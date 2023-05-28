@@ -22,7 +22,7 @@
 
 * 20 scans in total, all around 53 years old
 
-​	<img src="readme.md.assets/image-20230525213327022.png" alt="image-20230525213327022" style="zoom:67%;" />
+  ​	<img src="readme.assets/image-20230528022702265.png" alt="image-20230528022702265" style="zoom:67%;" />
 
 * Bias Correction:
 
