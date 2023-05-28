@@ -1,27 +1,31 @@
-`nii_and_h5_file_format.ipynb` : Info about how to handle `.nii` and `.h5` files.
+**File structure**:
 
-`Inference_brain_age.ipynb`:   Use pre-trained SFCN model to predict brain age of the 20 scans in the small dataset
+* `nii_and_h5_file_format.ipynb` : 
+
+  Info about how to handle `.nii` and `.h5` files.
+
+* `Inference_brain_age.ipynb`:  
+
+  Use pre-trained SFCN model to predict brain age of the 20 scans in the small dataset
 
 **Inference**：
 
-data flow: .h5 file -> numpy array -> reshape to (batch_size, 1, 160, 192, 160) -> tensor as model input
+* data flow: 
 
-**Questions:**
+  .h5 file -> numpy array -> reshape to (batch_size, 1, 160, 192, 160) -> tensor as model input
 
-1. chronological age out of range (42, 82)
+* bins: 
 
-2. don't need the "preprocess steps":
-
-   ```python
-   data_prep_0 = data_raw/data_raw.mean()
-   data_prep = dpu.crop_center(data_prep_0, (160, 192, 160))
-   ```
-
-   
+  14-94, with 2 years interval
 
 **Result:**
 
-20 scans in total, all around 62 years old (<u>not sure if correct</u>)
+* 20 scans in total, all around 53 years old
 
 ​	<img src="readme.md.assets/image-20230525213327022.png" alt="image-20230525213327022" style="zoom:67%;" />
 
+* Bias Correction:
+
+  **SOMETHING IS WRONG HERE**
+
+  ​	<img src="readme.assets/image-20230528022405369.png" alt="image-20230528022405369" style="zoom:67%;" />
