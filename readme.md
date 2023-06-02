@@ -1,12 +1,18 @@
-**File structure**:
+# `Training.ipynb`
 
-* `nii_and_h5_file_format.ipynb` : 
+Code to build cVAE via Keras
 
-  Info about how to handle `.nii` and `.h5` files.
+Most copied from the original cVAE repository
 
-* `Inference_brain_age.ipynb`:  
+(160, 192, 160) is too large for my PC to experiment
 
-  Use pre-trained SFCN model to predict brain age of the 20 scans in the small dataset
+# `nii_and_h5_file_format.ipynb` : 
+
+Info about how to handle `.nii` and `.h5` files.
+
+#  `Inference_brain_age.ipynb`:  
+
+Use pre-trained SFCN model to predict brain age of the 20 scans in the small dataset
 
 **Inference**：
 
