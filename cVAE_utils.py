@@ -3,10 +3,11 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import ToTensor
 from torchinfo import summary
-import numpy as  np
+import numpy as np
 
 conv_shape = [-1, 512, 3, 4, 3]
 flattened_dim = np.prod(conv_shape) * -1
+
 
 class GaussianSampleLayer(nn.Module):
     """
@@ -15,6 +16,7 @@ class GaussianSampleLayer(nn.Module):
     :param lv: log variance of the feature
     :return: mu + std * N(0,1)
     """
+
     def __init__(self):
         super().__init__()
 
@@ -24,16 +26,18 @@ class GaussianSampleLayer(nn.Module):
         sample = eps.mul(std).add(mu)
         return sample
 
-class  cVAE_encoder(nn.Module):
+
+class cVAE_encoder(nn.Module):
     """
     Encoders for inferring both salient and irrelevant features
     input size: [batch_size, n_channels=1, 160, 192, 160]
     Output dim: [batch_size, latent_dim]
     maybe set salient dim to 2 and irrlevant dim to 6
     """
+
     def __init__(self, intermediate_dim=128, latent_dim=2, use_bias=True):
         """
-        the model structure is just a draft, not sure makes sense
+        ! the model structure is just a draft, not sure makes sense
         adapted from https://github.com/xmuyzz/3D-CNN-PyTorch/blob/master/models/C3DNet.py
         can add residual later
         """
@@ -45,24 +49,24 @@ class  cVAE_encoder(nn.Module):
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=(5, 5, 5), stride=(3, 3, 3)))
         self.conv_block_2 = nn.Sequential(
-            nn.Conv3d(64, 128, kernel_size=7, padding=3),
+            nn.Conv3d(64, 128, kernel_size=7, padding=3, bias=use_bias),
             nn.BatchNorm3d(128),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=(5, 5, 5), stride=(3, 3, 3)))
         self.conv_block_3 = nn.Sequential(
-            nn.Conv3d(128, 256, kernel_size=5, padding=2),
+            nn.Conv3d(128, 256, kernel_size=5, padding=2, bias=use_bias),
             nn.BatchNorm3d(256),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=(3, 3, 3), stride=(2, 2, 2)))
         self.conv_block_4 = nn.Sequential(
-            nn.Conv3d(256, 512, kernel_size=3, padding=1),
+            nn.Conv3d(256, 512, kernel_size=3, padding=1, bias=use_bias),
             nn.BatchNorm3d(512),
             nn.ReLU(),
             nn.MaxPool3d(kernel_size=(3, 3, 3), stride=(2, 2, 2)))
 
         self.fc_block = nn.Sequential(
             nn.Linear(flattened_dim, intermediate_dim, bias=use_bias),
-            nn.ReLU(), ## ? choose of activation func
+            nn.ReLU(),  ## ? choose of activation func
             nn.Dropout(0.2))
 
         self.fc_mean_block = nn.Sequential(
@@ -72,7 +76,6 @@ class  cVAE_encoder(nn.Module):
             nn.Linear(intermediate_dim, latent_dim, bias=use_bias))
 
         self.sample_block = GaussianSampleLayer()
-
 
     def forward(self, x):
         # conv layers to shrink the size down
@@ -96,15 +99,15 @@ class  cVAE_encoder(nn.Module):
         return mean, log_var, f
 
 
-class  cVAE_decoder(nn.Module):
+class cVAE_decoder(nn.Module):
     """
     cVAE decoder,
-    take in [batch_size, salient_dim + irrelevant_dim],
-    reconstruct input of size [batch_size, 1, 160, 192, 160]
+    output reconstructed input of size [batch_size, 1, 160, 192, 160]
     """
+
     def __init__(self, intermediate_dim=128, latent_dim=8, use_bias=True):
         """
-        draft of decoder structure
+        ! draft of decoder structure, not sure makes sense
         adapted from https://pytorch.org/docs/stable/generated/torch.nn.ConvTranspose3d.html
         :param latent_dim: sum of the dim of the salient and the irrelevant features
         """
@@ -116,45 +119,107 @@ class  cVAE_decoder(nn.Module):
             nn.ReLU())
 
         self.trans_conv_block1 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=512, out_channels=256, kernel_size=4, stride=1, padding=0),
+            nn.ConvTranspose3d(in_channels=512, out_channels=256, kernel_size=4, stride=1, padding=0, bias=use_bias),
             nn.BatchNorm3d(num_features=256),
             nn.ReLU())
         self.trans_conv_block2 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=256, out_channels=128, kernel_size=5, stride=1, padding=0),
+            nn.ConvTranspose3d(in_channels=256, out_channels=128, kernel_size=5, stride=1, padding=0, bias=use_bias),
             nn.BatchNorm3d(num_features=128),
             nn.ReLU())
         self.trans_conv_block3 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=128, out_channels=64, kernel_size=[6,9,6], stride=3, padding=1),
+            nn.ConvTranspose3d(in_channels=128, out_channels=64, kernel_size=[6, 9, 6], stride=3, padding=1,
+                               bias=use_bias),
             nn.BatchNorm3d(num_features=64),
             nn.Tanh())
         self.trans_conv_block4 = nn.Sequential(
-            nn.ConvTranspose3d(in_channels=64, out_channels=1, kernel_size=[10,12,10], stride=5, padding=0),
+            nn.ConvTranspose3d(in_channels=64, out_channels=1, kernel_size=[10, 12, 10], stride=5, padding=0,
+                               bias=use_bias),
             nn.BatchNorm3d(num_features=1),
-            nn.Tanh())  ## ? what's the range of input MRI
+            nn.Tanh())  ## ?? need to pre-process the input range to -1 ~ 1
 
-    def forward(self, f):
+    def forward(self, salient, irrelevant):
+        f = torch.hstack((salient, irrelevant))
+        # print(f.shape)
+
         h = self.fc_block(f)
         h = h.view(conv_shape)
 
         h = self.trans_conv_block1(h)
         h = self.trans_conv_block2(h)
         h = self.trans_conv_block3(h)
-        x = self.trans_conv_block4(h)
-        return x
+        reconstructed_x = self.trans_conv_block4(h)
+        return reconstructed_x
+
+class cVAE_discriminator(nn.Module):
+    """
+    no use when batch_size=1
+    """
+    def __init__(self, latent_dim=8):
+        super().__init__()
+        self.fc_block = nn.Sequential(
+            nn.Linear(latent_dim, 1),
+            nn.Sigmoid())
+
+    def forward(self, salient, irrelevant):
+        # split the batch of latent feature (row-wise)
+        batch_size = salient.shape[0]
+        s1 = salient[:int(batch_size/2), :]  # first half batch of the salient features
+        s2 = salient[int(batch_size/2):, :]  # second half batch of the salient features
+        z1 = irrelevant[:int(batch_size / 2), :]  # first half batch of the irrelevant features
+        z2 = irrelevant[int(batch_size / 2):, :]  # second half batch of the irrelevant features
+
+        # sample from q joint
+        v = torch.hstack((salient, irrelevant))
+        v_score = self.fc_block(v) ## ? +1)*0.85 in CVAE-ASD repo
+
+        # sample from q prod
+        v_bar = torch.vstack((torch.hstack((s1, z2)), torch.hstack((s2, z1))))
+        v_bar_score = self.fc_block(v_bar)
+        return v_score, v_bar_score
 
 
 
+class ContrastiveVAE(nn.Module):
+    def __init__(self, intermediate_dim=128, salient_dim=2, irrelevant_dim=6, disentangle=True, use_bias=True):
+        super().__init__()
+
+        self.salient_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
+                                            use_bias=use_bias)
+        self.irrelevant_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
+                                               use_bias=use_bias)
+        self.decoder = cVAE_decoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim+irrelevant_dim,
+                                    use_bias=True)
+
+    def forward(self, x):
+        """
+        ? In the original Keras code: s --> irrelevant, z --> salient
+        **         HERE:              s --> salient, z --> irrelevant      **
+        :param x:
+        :return:
+        """
+        # get salient features
+        s_mu, s_lv, s = self.salient_encoder(x)
+        # get irrelevant features
+        z_mu, z_lv, z = self.salient_encoder(x)
+        # get reconstructed input
+        reconst_x = self.decoder(s, z)
 
 
 if __name__ == '__main__':
+    print(int(1 / 2))
+
+    batch_size = 2  # large batch_size will lead to cuda out of memory
+    s_dim = 2
+    z_dim = 6  # increasing the size of irrelevant features can help with the result
+
     # enc = cVAE_encoder()
     # print(enc)
-    # summary(enc, input_size=(1, 1, 160, 192, 160))  ## large batch_size will lead to cuda out of memory
+    # summary(enc, input_size=(batch_size, 1, 160, 192, 160))
 
-    latent_dim_sum = 2 + 6
-    dec = cVAE_decoder()
-    print(dec)
-    summary(dec, input_size=(1, 1, latent_dim_sum))
+    # dec = cVAE_decoder()
+    # print(dec)
+    # summary(dec, input_size=((batch_size, s_dim), (batch_size, z_dim)))
 
-
-
+    # disc = cVAE_discriminator()
+    # print(disc)
+    # summary(disc, input_size=((batch_size, s_dim), (batch_size, z_dim)))
