@@ -1,3 +1,9 @@
+# `cVAE_utils.py`
+
+build cVAE models via pyTorch
+
+ (encoder + decoder part)
+
 # `Training.ipynb`
 
 Code to build cVAE via Keras
