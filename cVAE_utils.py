@@ -1,7 +1,5 @@
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
-from torchvision.transforms import ToTensor
 from torchinfo import summary
 import numpy as np
 
@@ -188,7 +186,6 @@ class ContrastiveVAE(nn.Module):
 
         self.salient_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
                                             use_bias=use_bias)
-
         self.irrelevant_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
                                                use_bias=use_bias)
 
@@ -202,33 +199,50 @@ class ContrastiveVAE(nn.Module):
         self.disentangle = disentangle
 
 
-    def forward(self, x):
+    def forward(self, x_tg, x_bg):
         """
         ? In the original Keras code: s --> irrelevant, z --> salient
         **         HERE:              s --> salient, z --> irrelevant      **
         :param x:
         :return:
         """
+
+        ''' For the target dataset: '''
+
         # get salient features
-        s_mu, s_lv, s = self.salient_encoder(x)
+        s_mu_tg, s_lv_tg, s_tg = self.salient_encoder(x_tg)
         # get irrelevant features
-        z_mu, z_lv, z = self.irrelevant_encoder(x)
+        z_mu_tg, z_lv_tg, z_tg = self.irrelevant_encoder(x_tg)
 
         # get reconstructed input
-        reconst_x = self.decoder(s, z)
+        reconst_tg = self.decoder(s_tg, z_tg)
 
         # disentangle: force the independence between the salient and the irrelevant features.
-        v_score, v_bar_score = None, None
-        batch_size=s.shape[0]
+        ## can also set to false when in eval
+        v_score_tg, v_bar_score_tg = None, None
+        batch_size = s_tg.shape[0]
         if batch_size==1:  # cannot disentangle if there's only one sample in a batch
             self.disentangle = False
         if self.disentangle:
-            v_score, v_bar_score = self.discriminator(s, z)
+            v_score_tg, v_bar_score_tg = self.discriminator(s_tg, z_tg)
 
-        output_dict = {"s_mu": s_mu, "s_lv": s_lv, "s": s,
-                       "z_mu": z_mu, "z_lv": z_lv, "z": z,
-                       "reconst_x": reconst_x,
-                       "v_score": v_score, "v_bar_score": v_bar_score}
+        ''' For the background dataset: '''
+
+        # get salient features
+        s_zero = torch.zeros_like(s_tg)
+        # get irrelevant features
+        z_mu_bg, z_lv_bg, z_bg = self.irrelevant_encoder(x_bg)
+
+        # get reconstructed input
+        reconst_bg = self.decoder(s_zero, z_bg)
+
+        ''' Output Dict: '''
+        output_dict = {"s_mu_tg": s_mu_tg, "s_lv_tg": s_lv_tg, "s_tg": s_tg,
+                       "z_mu_tg": z_mu_tg, "z_lv_tg": z_lv_tg, "z_tg": z_tg,
+                       "reconst_tg": reconst_tg,
+                       "v_score_tg": v_score_tg, "v_bar_score_tg": v_bar_score_tg,
+                       "z_mu_bg": z_mu_bg, "z_lv_bg": z_lv_bg, "z_bg": z_bg,
+                       "reconst_bg": reconst_bg}
         return output_dict
 
 
@@ -252,7 +266,7 @@ if __name__ == '__main__':
     # print(disc)
     # summary(disc, input_size=((batch_size, s_dim), (batch_size, z_dim)))
 
-    # cVAE = ContrastiveVAE(salient_dim=s_dim, irrelevant_dim=z_dim)
-    # print(cVAE)
-    # summary(cVAE, input_size=(batch_size, 1, 160, 192, 160))
+    cVAE = ContrastiveVAE(salient_dim=s_dim, irrelevant_dim=z_dim)
+    print(cVAE)
+    summary(cVAE, input_size=((batch_size, 1, 160, 192, 160), (batch_size, 1, 160, 192, 160)))
 
