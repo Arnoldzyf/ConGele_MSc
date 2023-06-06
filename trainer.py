@@ -2,6 +2,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import ToTensor
 import torch
 import argparse
+import numpy as np
 
 device = (
     "cuda"
@@ -17,6 +18,9 @@ def get_args():
     """
     parser = argparse.ArgumentParser('contrastive VAE Model')
     # add sth later
+    # ...
+    args = parser.parse_args()
+    return args
 
 def train(dataloader, model, loss_fn, optimizer):
     size = len(dataloader.dataset)
@@ -40,3 +44,7 @@ def train(dataloader, model, loss_fn, optimizer):
 if __name__ == '__main__':
     print(f"Using {device} device")
     args = get_args()
+
+    test_target = np.random.random((10, 1, 160, 192, 160))  # range:[0,1), but actual data may be not in
+    test_background = np.random.random((10, 1, 160, 192, 160))
+    

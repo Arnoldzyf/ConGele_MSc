@@ -150,10 +150,12 @@ class cVAE_decoder(nn.Module):
         reconstructed_x = self.trans_conv_block4(h)
         return reconstructed_x
 
+
 class cVAE_discriminator(nn.Module):
     """
     no use when batch_size=1
     """
+
     def __init__(self, latent_dim=8):
         super().__init__()
         self.fc_block = nn.Sequential(
@@ -163,15 +165,15 @@ class cVAE_discriminator(nn.Module):
     def forward(self, salient, irrelevant):
         # split the batch of latent feature (row-wise)
         batch_size = salient.shape[0]
-        s1 = salient[:int(batch_size/2), :]  # first half batch of the salient features
-        s2 = salient[int(batch_size/2):, :]  # second half batch of the salient features
+        s1 = salient[:int(batch_size / 2), :]  # first half batch of the salient features
+        s2 = salient[int(batch_size / 2):, :]  # second half batch of the salient features
         z1 = irrelevant[:int(batch_size / 2), :]  # first half batch of the irrelevant features
         z2 = irrelevant[int(batch_size / 2):, :]  # second half batch of the irrelevant features
 
         # sample from q joint
         v = torch.hstack((salient, irrelevant))
         # should --> 0
-        v_score = self.fc_block(v) ## ? +1)*0.85 in CVAE-ASD repo
+        v_score = self.fc_block(v)  ## ? +1)*0.85 in CVAE-ASD repo
 
         # sample from q prod
         v_bar = torch.vstack((torch.hstack((s1, z2)), torch.hstack((s2, z1))))
@@ -189,15 +191,14 @@ class ContrastiveVAE(nn.Module):
         self.irrelevant_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
                                                use_bias=use_bias)
 
-        self.decoder = cVAE_decoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim+irrelevant_dim,
+        self.decoder = cVAE_decoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim + irrelevant_dim,
                                     use_bias=True)
 
         self.discriminator = None
         if disentangle:
-            self.discriminator = cVAE_discriminator(latent_dim=salient_dim+irrelevant_dim)
+            self.discriminator = cVAE_discriminator(latent_dim=salient_dim + irrelevant_dim)
 
         self.disentangle = disentangle
-
 
     def forward(self, x_tg, x_bg):
         """
@@ -207,8 +208,9 @@ class ContrastiveVAE(nn.Module):
         :return:
         """
 
-        ''' For the target dataset: '''
-
+        ''' 
+        For the target dataset: 
+        '''
         # get salient features
         s_mu_tg, s_lv_tg, s_tg = self.salient_encoder(x_tg)
         # get irrelevant features
@@ -221,13 +223,12 @@ class ContrastiveVAE(nn.Module):
         ## can also set to false when in eval
         v_score_tg, v_bar_score_tg = None, None
         batch_size = s_tg.shape[0]
-        if batch_size==1:  # cannot disentangle if there's only one sample in a batch
-            self.disentangle = False
-        if self.disentangle:
+        if batch_size != 1 & self.disentangle:  # cannot disentangle if there's only one sample in a batch
             v_score_tg, v_bar_score_tg = self.discriminator(s_tg, z_tg)
 
-        ''' For the background dataset: '''
-
+        ''' 
+        For the background dataset: 
+        '''
         # get salient features
         s_zero = torch.zeros_like(s_tg)
         # get irrelevant features
@@ -236,7 +237,9 @@ class ContrastiveVAE(nn.Module):
         # get reconstructed input
         reconst_bg = self.decoder(s_zero, z_bg)
 
-        ''' Output Dict: '''
+        ''' 
+        Output Dict: 
+          '''
         output_dict = {"s_mu_tg": s_mu_tg, "s_lv_tg": s_lv_tg, "s_tg": s_tg,
                        "z_mu_tg": z_mu_tg, "z_lv_tg": z_lv_tg, "z_tg": z_tg,
                        "reconst_tg": reconst_tg,
@@ -244,7 +247,6 @@ class ContrastiveVAE(nn.Module):
                        "z_mu_bg": z_mu_bg, "z_lv_bg": z_lv_bg, "z_bg": z_bg,
                        "reconst_bg": reconst_bg}
         return output_dict
-
 
 
 if __name__ == '__main__':
@@ -269,4 +271,3 @@ if __name__ == '__main__':
     cVAE = ContrastiveVAE(salient_dim=s_dim, irrelevant_dim=z_dim)
     print(cVAE)
     summary(cVAE, input_size=((batch_size, 1, 160, 192, 160), (batch_size, 1, 160, 192, 160)))
-

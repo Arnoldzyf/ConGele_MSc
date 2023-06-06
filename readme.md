@@ -1,8 +1,6 @@
 # `cVAE_utils.py`
 
-build cVAE models via pyTorch
-
- (encoder + decoder part)
+cVAE architecture
 
 # `Training.ipynb`
 
