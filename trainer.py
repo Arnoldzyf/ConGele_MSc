@@ -73,12 +73,12 @@ if __name__ == '__main__':
             batch_size=args.batch_size, shuffle=True, num_workers=1)  # parallelized shuffle
 
     '''validation data and dataloader'''
-    val_target = np.random.random((5, 1, 160, 192, 160)) 
+    val_target = np.random.random((5, 1, 160, 192, 160))
     val_background = np.random.random((5, 1, 160, 192, 160))
     # shuffle through first index
     np.random.shuffle(val_target)
     np.random.shuffle(val_background)
-    train_loader = DataLoader(
+    val_loader = DataLoader(
         ConcatDataset(val_target, val_background),
         batch_size=args.batch_size, shuffle=True, num_workers=1)
 
