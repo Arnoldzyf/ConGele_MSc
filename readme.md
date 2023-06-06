@@ -1,3 +1,9 @@
+# `trianer.py`
+
+functions to train the cVAE
+
+use test class for smaller input `(6,9,6)` for now.
+
 # `cVAE_utils.py`
 
 cVAE architecture
