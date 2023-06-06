@@ -3,6 +3,8 @@ from torch import nn
 from torchinfo import summary
 import numpy as np
 
+from test_utils import test_decoder, test_encoder
+
 conv_shape = [-1, 512, 3, 4, 3]
 flattened_dim = np.prod(conv_shape) * -1
 
@@ -183,7 +185,8 @@ class cVAE_discriminator(nn.Module):
 
 
 class ContrastiveVAE(nn.Module):
-    def __init__(self, intermediate_dim=128, salient_dim=2, irrelevant_dim=6, disentangle=True, use_bias=True):
+    def __init__(self, intermediate_dim=128, salient_dim=2, irrelevant_dim=6, disentangle=True, use_bias=True,
+                 building_test=True):
         super().__init__()
 
         self.salient_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
@@ -199,6 +202,16 @@ class ContrastiveVAE(nn.Module):
             self.discriminator = cVAE_discriminator(latent_dim=salient_dim + irrelevant_dim)
 
         self.disentangle = disentangle
+
+        ''' use smaller input while building the model'''
+        if building_test:
+            self.salient_encoder = test_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
+                                                use_bias=use_bias)
+            self.irrelevant_encoder = test_encoder(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
+                                                   use_bias=use_bias)
+            self.decoder = test_decoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim + irrelevant_dim,
+                                        use_bias=True)
+
 
     def forward(self, x_tg, x_bg):
         """
@@ -223,7 +236,8 @@ class ContrastiveVAE(nn.Module):
         ## can also set to false when in eval
         v_score_tg, v_bar_score_tg = None, None
         batch_size = s_tg.shape[0]
-        if batch_size != 1 & self.disentangle:  # cannot disentangle if there's only one sample in a batch
+        # no disentangle if there's only one sample in a batch, or in evaluation mode
+        if batch_size != 1 and self.disentangle and self.training:
             v_score_tg, v_bar_score_tg = self.discriminator(s_tg, z_tg)
 
         ''' 
@@ -243,15 +257,13 @@ class ContrastiveVAE(nn.Module):
         output_dict = {"s_mu_tg": s_mu_tg, "s_lv_tg": s_lv_tg, "s_tg": s_tg,
                        "z_mu_tg": z_mu_tg, "z_lv_tg": z_lv_tg, "z_tg": z_tg,
                        "reconst_tg": reconst_tg,
-                       "v_score_tg": v_score_tg, "v_bar_score_tg": v_bar_score_tg,
+                       "v_score": v_score_tg, "v_bar_score": v_bar_score_tg,
                        "z_mu_bg": z_mu_bg, "z_lv_bg": z_lv_bg, "z_bg": z_bg,
                        "reconst_bg": reconst_bg}
         return output_dict
 
 
 if __name__ == '__main__':
-    print(int(1 / 2))
-
     batch_size = 1  ##! batch_size==2 will lead to cuda out of memory...
     s_dim = 2
     z_dim = 6  # increasing the size of irrelevant features can help with the result
