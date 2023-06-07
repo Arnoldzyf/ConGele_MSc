@@ -233,11 +233,10 @@ class ContrastiveVAE(nn.Module):
         reconst_tg = self.decoder(s_tg, z_tg)
 
         # disentangle: force the independence between the salient and the irrelevant features.
-        ## can also set to false when in eval
         v_score_tg, v_bar_score_tg = None, None
         batch_size = s_tg.shape[0]
-        # no disentangle if there's only one sample in a batch, or in evaluation mode
-        if batch_size != 1 and self.disentangle and self.training:
+        # no disentangle if there's only one sample in a batch
+        if batch_size != 1 and self.disentangle:  # no need self.training
             v_score_tg, v_bar_score_tg = self.discriminator(s_tg, z_tg)
 
         ''' 
