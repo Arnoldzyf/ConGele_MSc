@@ -170,4 +170,6 @@ if __name__ == '__main__':
         train(train_loader=train_loader, cVAE=cVAE, disentangle=args.disentangle, optimizer=optimizer, # just pass in the whole args can be simpler...
               beta=args.beta, gamma=args.gamma, batch_size=args.batch_size, logging_interval=args.logging_interval)
         # test(test_dataloader, model, loss_fn)
+
+        ## ! add early stop, patience later
     print("Done!")

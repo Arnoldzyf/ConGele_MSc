@@ -186,7 +186,7 @@ class cVAE_discriminator(nn.Module):
 
 class ContrastiveVAE(nn.Module):
     def __init__(self, intermediate_dim=128, salient_dim=2, irrelevant_dim=6, disentangle=True, use_bias=True,
-                 building_test=True):
+                 building_test=False):
         super().__init__()
 
         self.salient_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
@@ -257,7 +257,7 @@ class ContrastiveVAE(nn.Module):
         output_dict = {"s_mu_tg": s_mu_tg, "s_lv_tg": s_lv_tg, "s_tg": s_tg,
                        "z_mu_tg": z_mu_tg, "z_lv_tg": z_lv_tg, "z_tg": z_tg,
                        "reconst_tg": reconst_tg,
-                       "v_score": v_score_tg, "v_bar_score": v_bar_score_tg,
+                       "v_score": v_score_tg, "v_bar_score": v_bar_score_tg,  # background have no v_(bar_)score
                        "z_mu_bg": z_mu_bg, "z_lv_bg": z_lv_bg, "z_bg": z_bg,
                        "reconst_bg": reconst_bg}
         return output_dict
