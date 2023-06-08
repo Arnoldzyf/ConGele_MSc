@@ -1,15 +1,31 @@
-"""
-(160, 192, 160) is too large for my PC to run, so use smaller input to test
-assume input size (6,9,6)
-"""
-
 import torch
 from torch import nn
 from torchinfo import summary
 import numpy as np
+import matplotlib.pyplot as plt
+import os
 
-input_dim = (-1, 1, 6,9,6)
-input_dim_flatten = np.prod(input_dim) * -1
+
+def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', run=False, encoder=None, sample=None,
+                            path=None):
+    """
+    use mean value inferred by encoder and sample labels to plot
+    if run = True, take in encoder and samples and infer mean; otherwise take in mean value directly
+    """
+    if run:
+        mu, _, _ = encoder(sample)
+    # plot:
+    plt.figure()
+    plt.scatter(mu[:, 0],mu[:, 1], c=label, cmap='Accent')
+    plt.title(name + ', Silhouette score: ' + str(ss))
+    if path is None:
+        plt.show()
+    else:
+        dir = os.path.dirname(path)
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+        plt.savefig(path)
+
 
 class GaussianSampleLayer(nn.Module):
     """
@@ -30,8 +46,14 @@ class GaussianSampleLayer(nn.Module):
         sample = eps.mul(std).add(mu)
         return sample
 
-class test_encoder(nn.Module):
 
+""" set args.building_test to True"""
+input_dim = (-1, 1, 6,9,6)
+input_dim_flatten = np.prod(input_dim) * -1
+
+
+class test_encoder(nn.Module):
+    """ input size (-1, 1, 6, 9, 6) """
     def __init__(self, intermediate_dim=128, latent_dim=2, use_bias=True):
         super().__init__()
         self.to_intermediate = nn.Linear(input_dim_flatten, intermediate_dim, bias=use_bias)
@@ -47,8 +69,9 @@ class test_encoder(nn.Module):
         f = self.sample(mean, log_var)
         return mean, log_var, f
 
-class test_decoder(nn.Module):
 
+class test_decoder(nn.Module):
+    """ output size (-1, 1, 6, 9, 6) """
     def __init__(self, intermediate_dim=128, latent_dim=8, use_bias=True):
         super().__init__()
         self.back_to_intermediate = nn.Linear(latent_dim, intermediate_dim, bias=use_bias)

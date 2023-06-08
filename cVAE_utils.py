@@ -3,31 +3,10 @@ from torch import nn
 from torchinfo import summary
 import numpy as np
 
-from test_utils import test_decoder, test_encoder
+from utils import test_decoder, test_encoder, GaussianSampleLayer
 
 conv_shape = [-1, 512, 3, 4, 3]
 flattened_dim = np.prod(conv_shape) * -1
-
-
-class GaussianSampleLayer(nn.Module):
-    """
-    Sampling once from a Gaussian distribution
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, mu, lv):
-        """
-        :param mu: mean of the feature
-        :param lv: log variance of the feature
-        :return: sample: mu + std * N(0,1)
-        """
-        std = torch.sqrt(torch.exp(lv))
-        eps = torch.randn_like(std)
-        sample = eps.mul(std).add(mu)
-        return sample
-
 
 class cVAE_encoder(nn.Module):
     """
@@ -186,7 +165,7 @@ class cVAE_discriminator(nn.Module):
 
 class ContrastiveVAE(nn.Module):
     def __init__(self, intermediate_dim=128, salient_dim=2, irrelevant_dim=6, disentangle=True, use_bias=True,
-                 building_test=False):
+                 build_test=False):
         super().__init__()
 
         self.salient_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
@@ -204,7 +183,7 @@ class ContrastiveVAE(nn.Module):
         self.disentangle = disentangle
 
         ''' use smaller input while building the model'''
-        if building_test:
+        if build_test:
             self.salient_encoder = test_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
                                                 use_bias=use_bias)
             self.irrelevant_encoder = test_encoder(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
@@ -260,6 +239,9 @@ class ContrastiveVAE(nn.Module):
                        "z_mu_bg": z_mu_bg, "z_lv_bg": z_lv_bg, "z_bg": z_bg,
                        "reconst_bg": reconst_bg}
         return output_dict
+
+    def get_salient_encoder(self):
+        return self.salient_encoder
 
 
 if __name__ == '__main__':
