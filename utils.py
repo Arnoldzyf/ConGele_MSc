@@ -6,8 +6,32 @@ import matplotlib.pyplot as plt
 import os
 
 
-def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', run=False, encoder=None, sample=None,
-                            path=None):
+def load_checkpoint(last_model_path, model, optimizer):
+    if os.path.isfile(last_model_path):
+        state_dict = torch.load(last_model_path)
+        model.load_state_dict(state_dict['model'])
+        optimizer.load_state_dict(state_dict['optimizer'])
+        print('Loaded from a previous saved model {}'.format(last_model_path))
+        return state_dict
+
+
+def save_checkpoint(model_info_dir, trial_name, model, optimizer, epoch, best_loss, bad_epochs, val_info_history, name):
+    " name: best/last/final "
+    state_dict = {
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'best_loss': best_loss,
+        'bad_epochs': bad_epochs,
+        'val_info_history': val_info_history
+    }
+    path = os.path.join(model_info_dir, trial_name + "_" + name + ".pth")
+    torch.save(state_dict, path)
+    print(f"Finish saving the {name} model.")
+
+
+def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', path=None,
+                            run=False, encoder=None, sample=None):
     """
     use mean value inferred by encoder and sample labels to plot
     if run = True, take in encoder and samples and infer mean; otherwise take in mean value directly
@@ -16,7 +40,7 @@ def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', run=Fals
         mu, _, _ = encoder(sample)
     # plot:
     plt.figure()
-    plt.scatter(mu[:, 0],mu[:, 1], c=label, cmap='Accent')
+    plt.scatter(mu[:, 0], mu[:, 1], c=label, cmap='Accent')
     plt.title(name + ', Silhouette score: ' + str(ss))
     if path is None:
         plt.show()
@@ -25,6 +49,7 @@ def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', run=Fals
         if not os.path.exists(dir):
             os.makedirs(dir)
         plt.savefig(path)
+        plt.close()
 
 
 class GaussianSampleLayer(nn.Module):
@@ -47,13 +72,16 @@ class GaussianSampleLayer(nn.Module):
         return sample
 
 
-""" set args.building_test to True"""
-input_dim = (-1, 1, 6,9,6)
+""" 
+set args.building_test to True if using test classes:
+"""
+input_dim = (-1, 1, 6, 9, 6)
 input_dim_flatten = np.prod(input_dim) * -1
 
 
 class test_encoder(nn.Module):
     """ input size (-1, 1, 6, 9, 6) """
+
     def __init__(self, intermediate_dim=128, latent_dim=2, use_bias=True):
         super().__init__()
         self.to_intermediate = nn.Linear(input_dim_flatten, intermediate_dim, bias=use_bias)
@@ -72,6 +100,7 @@ class test_encoder(nn.Module):
 
 class test_decoder(nn.Module):
     """ output size (-1, 1, 6, 9, 6) """
+
     def __init__(self, intermediate_dim=128, latent_dim=8, use_bias=True):
         super().__init__()
         self.back_to_intermediate = nn.Linear(latent_dim, intermediate_dim, bias=use_bias)
@@ -83,4 +112,3 @@ class test_decoder(nn.Module):
         h = self.back_to_original_dim(h)
         reconstructed_x = h.view(input_dim)
         return reconstructed_x
-
