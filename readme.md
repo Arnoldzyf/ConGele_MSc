@@ -1,3 +1,9 @@
+# `SFCN_trainer.py` 
+
+functions to train and validate SFCN
+
+initialized by the pretrained model
+
 # `cVAE_trianer.py`
 
 functions to train and validate the cVAE
