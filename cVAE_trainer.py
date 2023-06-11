@@ -12,7 +12,7 @@ from sklearn.metrics import silhouette_score
 import os
 
 from cVAE_utils import ContrastiveVAE
-from utils import plot_latent_features_2D, save_checkpoint, load_checkpoint
+from utils import plot_latent_features_2D, save_checkpoint, load_checkpoint, ConcatDataset
 
 device = (
     "cuda"
@@ -54,11 +54,11 @@ def get_args():
                         help='number of epochs without improvement on validation set before early stopping')
 
     # Add logging/checkpoint arguments
-    parser.add_argument('--logging_interval', default=10, type=int,
+    parser.add_argument('--logging-interval', default=10, type=int,
                         help='the batch interval to print training loss')  ## ! change to 100 later
     parser.add_argument('--plot-interval', default=1, type=int, help='the epoch interval to plot salient features '
                                                                      'while validation')
-    parser.add_argument('--save-root-dir', default="./trained_models", type=str,
+    parser.add_argument('--save-root-dir', default="./trained_cVAE", type=str,
                         help='the directory to save all the models '
                              'and their training info')
     parser.add_argument('--trial-name', default="test0", type=str, help='the name of the current model, will be used '
@@ -69,17 +69,6 @@ def get_args():
 
     args = parser.parse_args()
     return args
-
-
-class ConcatDataset(torch.utils.data.Dataset):
-    def __init__(self, *datasets):
-        self.datasets = datasets
-
-    def __getitem__(self, i):
-        return tuple(d[i] for d in self.datasets)
-
-    def __len__(self):
-        return min(len(d) for d in self.datasets)
 
 
 def compute_loss(X_tg, X_bg, pred, disentangle, beta, gamma, batch_size):
@@ -121,7 +110,7 @@ def compute_loss(X_tg, X_bg, pred, disentangle, beta, gamma, batch_size):
     return loss_dict
 
 
-def train(train_loader, cVAE, disentangle, optimizer, beta, gamma, batch_size, logging_interval):
+def cVAE_train(train_loader, cVAE, disentangle, optimizer, beta, gamma, batch_size, logging_interval):
     size = len(train_loader.dataset)
     cVAE.train()
     for batch, (X_tg, X_bg) in enumerate(train_loader):
@@ -148,7 +137,7 @@ def train(train_loader, cVAE, disentangle, optimizer, beta, gamma, batch_size, l
                   f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
 
 
-def validate(val_loader, cVAE, disentangle, beta, gamma, val_label, plot_interval=1, epoch=-1, plot_dir="./fig"):
+def cVAE_validate(val_loader, cVAE, disentangle, beta, gamma, val_label, plot_interval=1, epoch=-1, plot_dir="./fig"):
     """
     validation function of a epoch in the training loop
     can also plot the salient features
@@ -303,16 +292,18 @@ if __name__ == '__main__':
                             "loss": [],
                             "ss": []}
 
-    ''' Start training'''
+    ''' Start training '''
+    print(f"Start training with batch size of {args.batch_size}")
     for epoch in range(last_epoch + 1, args.max_epoch):
         print(f"Epoch {epoch + 1} -------------------------------:")
 
-        train(train_loader=train_loader, cVAE=cVAE, disentangle=args.disentangle, optimizer=optimizer,
-              beta=args.beta, gamma=args.gamma, batch_size=args.batch_size, logging_interval=args.logging_interval)
+        ## pass in the whole `args` should be easier
+        cVAE_train(train_loader=train_loader, cVAE=cVAE, disentangle=args.disentangle, optimizer=optimizer,
+                   beta=args.beta, gamma=args.gamma, batch_size=args.batch_size, logging_interval=args.logging_interval)
 
-        val_info = validate(val_loader=val_loader, cVAE=cVAE, disentangle=args.disentangle, beta=args.beta,
-                            gamma=args.gamma, val_label=val_label, plot_interval=args.plot_interval, epoch=epoch,
-                            plot_dir=plot_val_dir)
+        val_info = cVAE_validate(val_loader=val_loader, cVAE=cVAE, disentangle=args.disentangle, beta=args.beta,
+                                 gamma=args.gamma, val_label=val_label, plot_interval=args.plot_interval, epoch=epoch,
+                                 plot_dir=plot_val_dir)
 
         # record validation loss
         for key in set(val_info_history):
@@ -351,12 +342,11 @@ if __name__ == '__main__':
             print('No validation set improvements observed for {:d} epochs. Early stop!'.format(args.patience))
             break
         # force stop
-        if epoch == args.max_epoch-1:
+        if epoch == args.max_epoch - 1:
             save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
                             epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
                             name="final")
             print("! Reaching the maximum epoch number")
-
 
     print("Done!")
     ## !! test func haven't implement

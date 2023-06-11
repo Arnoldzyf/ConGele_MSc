@@ -30,6 +30,17 @@ def save_checkpoint(model_info_dir, trial_name, model, optimizer, epoch, best_lo
     print(f"Finish saving the {name} model.")
 
 
+class ConcatDataset(torch.utils.data.Dataset):
+    def __init__(self, *datasets):
+        self.datasets = datasets
+
+    def __getitem__(self, i):
+        return tuple(d[i] for d in self.datasets)
+
+    def __len__(self):
+        return min(len(d) for d in self.datasets)
+
+
 def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', path=None,
                             run=False, encoder=None, sample=None):
     """
