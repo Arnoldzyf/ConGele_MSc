@@ -1,3 +1,7 @@
+# `UKBB_test.ipynb`
+
+plot several scans in `\data\ukb\imaging\raw\t1_structural_nifti_20252`
+
 # `SFCN_trainer.py` 
 
 functions to train and validate SFCN
