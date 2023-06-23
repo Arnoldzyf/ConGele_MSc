@@ -1,5 +1,7 @@
 # `UKBB_test.ipynb`
 
+add age  and depression type info
+
 plot several scans in `\data\ukb\imaging\raw\t1_structural_nifti_20252`
 
 # `SFCN_trainer.py` 
