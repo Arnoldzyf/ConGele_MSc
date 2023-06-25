@@ -1,8 +1,20 @@
-# `UKBB_test.ipynb`
+# Data_info.csv
 
-add age  and depression type info
+For info about subjects in the `\data\ukb\imaging\raw\t1_structural_nifti_20252` folder
 
-plot several scans in `\data\ukb\imaging\raw\t1_structural_nifti_20252`
+* Columns:
+  * `f.eid`: subjects ID,
+  * `f.21003.2.0`: [Age when attended assessment centre (3rd instance)](https://biobank.ndph.ox.ac.uk/showcase/field.cgi?id=21003),
+  * `f.20126.0.0`: [Bipolar and major depression status](https://biobank.ctsu.ox.ac.uk/crystal/field.cgi?id=20126),
+  * `f.2976.2.0`: [Age diabetes diagnosed](https://biobank.ctsu.ox.ac.uk/crystal/field.cgi?id=2976)
+
+Please see detailed intro in the last section "Brief Analysis" in the `UKBB_20252.ipynb` file.
+
+# `UKBB_20252.ipynb`
+
+extract information about "age at assessment",  "depression status", "age diabetes diagnosed" of the subjects in the `\data\ukb\imaging\raw\t1_structural_nifti_20252` folder
+
+plot several scans in `\t1_structural_nifti_20252` -- need to use 
 
 # `SFCN_trainer.py` 
 
