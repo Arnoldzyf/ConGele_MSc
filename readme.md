@@ -1,4 +1,4 @@
-# Data_info.csv
+# `Data_info.csv`
 
 For info about subjects in the `\data\ukb\imaging\raw\t1_structural_nifti_20252` folder
 
