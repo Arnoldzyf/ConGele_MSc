@@ -14,7 +14,7 @@ Please see detailed intro in the last section "Brief Analysis" in the `UKBB_2025
 
 extract information about "age at assessment",  "depression status", "age diabetes diagnosed" of the subjects in the `\data\ukb\imaging\raw\t1_structural_nifti_20252` folder
 
-plot several scans in `\t1_structural_nifti_20252` -- need to use 
+plot several scans of one sample in `t1_structural_nifti_20252` -- need to use `T1/T1_brain_to_MNI.nii.gz`.
 
 # `SFCN_trainer.py` 
 
