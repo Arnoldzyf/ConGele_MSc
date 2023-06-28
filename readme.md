@@ -1,4 +1,8 @@
-# `temp/Data_info.csv`
+# `Inference_brain_age.ipynb`
+
+run SFCN on 100 HC and 30 only_depression scans.
+
+# `data/Data_info.csv`
 
 For info about subjects in the `\data\ukb\imaging\raw\t1_structural_nifti_20252` folder
 
@@ -50,7 +54,7 @@ Most copied from the original cVAE repository
 
 Info about how to handle `.nii` and `.h5` files.
 
-#  `Inference_brain_age.ipynb`:  
+#  `test_Inference_brain_age.ipynb`:  
 
 Use pre-trained SFCN model to predict brain age of the 20 scans in the small dataset
 
