@@ -4,6 +4,7 @@ from torchinfo import summary
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from sklearn.linear_model import LinearRegression
 
 
 def load_checkpoint(last_model_path, model, optimizer):
@@ -81,6 +82,20 @@ class GaussianSampleLayer(nn.Module):
         eps = torch.randn_like(std)
         sample = eps.mul(std).add(mu)
         return sample
+
+def bias_correction(y: np.ndarray, y_pred: np.ndarray):
+    """
+    :param y: chronological age (ground truth)
+    :param y_pred: brain age before bias correction (predictions)
+    :return: bias-corrected brain age
+    """
+    # Smith2019 bias correction
+    linear_fit = LinearRegression(fit_intercept=True).fit(
+        X=y, y=y_pred
+    )
+    intercept, slope = linear_fit.intercept_, linear_fit.coef_[0]
+    y_pred_unbiased = (y_pred - intercept) / (slope + np.finfo(np.float32).eps) # avoid division by 0
+    return y_pred_unbiased, intercept, slope
 
 
 """ 
