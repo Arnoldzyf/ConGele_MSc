@@ -1,6 +1,8 @@
 # `Inference_brain_age.ipynb`
 
-run SFCN on 100 HC and 30 only_depression scans.
+run on all the UKBB HC and only_depression scans, the data is extracted on the fly
+
+please ignore create dataset section
 
 # `data/Data_info.csv`
 
