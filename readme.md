@@ -4,7 +4,19 @@ run on all the UKBB HC and only_depression scans, the data is extracted on the f
 
 please ignore create dataset section
 
-# `data/Data_info.csv`
+
+
+# `data_info/T1_MNI_20252_2_0/` folder
+
+## `HC_pred_age_6802.csv`
+
+stores the predicted brain age, unbiased age, and prediction error of all the HC scans
+
+## `MDD_pred_age_2461.csv`
+
+stores the predicted brain age, unbiased age, and brain age gap of all the MDD scans
+
+## `T1_MNI_20252_2_0.csv`
 
 For info about subjects in the `\data\ukb\imaging\raw\t1_structural_nifti_20252` folder
 
@@ -13,6 +25,8 @@ For info about subjects in the `\data\ukb\imaging\raw\t1_structural_nifti_20252`
   * `f.21003.2.0`: [Age when attended assessment centre (3rd instance)](https://biobank.ndph.ox.ac.uk/showcase/field.cgi?id=21003),
   * `f.20126.0.0`: [Bipolar and major depression status](https://biobank.ctsu.ox.ac.uk/crystal/field.cgi?id=20126),
   * `f.2976.2.0`: [Age diabetes diagnosed](https://biobank.ctsu.ox.ac.uk/crystal/field.cgi?id=2976)
+  * `MNI`: Whether the subject has the `MNI` file
+  * `path`: storage path to save the `...MNI.nii` 
 
 Please see detailed intro in the last section "Brief Analysis" in the `UKBB_20252.ipynb` file.
 
