@@ -1,3 +1,10 @@
+import sys
+import os
+
+# the path that contains SFCN codes
+SFCN_path = "../UKBiobank_deep_pretrain-master"
+sys.path.append(SFCN_path)
+
 import torch
 from torch import nn
 from torchinfo import summary
@@ -5,7 +12,45 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 from sklearn.linear_model import LinearRegression
+import nibabel as nib
 
+from dp_model import dp_utils as dpu
+
+
+def create_dataset_from_nii_path_list(path_list):
+    """
+    extract array of nii image from path_list,
+    crop,
+    return np array of shap (n_samples, 1, 160, 192, 160)
+    """
+    arr_list = []
+
+    for path in path_list:
+        # get image array data
+        img_arr = obtain_arr_from_nii(path)  # (160, 192, 160)
+
+        # reshape -- add batch size, channel size
+        sp = (1, 1) + img_arr.shape
+        img_arr_reshape = img_arr.reshape(sp)  # (1, 1, 160, 192, 160)
+
+        arr_list.append(img_arr_reshape)
+
+    data_arr = np.vstack(arr_list)
+    return data_arr
+
+
+def obtain_arr_from_nii(path):
+    """
+    extract + crop
+    """
+    # extract nii object
+    img = nib.load(path)
+    # extract raw arr data
+    img_raw_arr = img.get_fdata()
+    # preprocess
+    img_arr_0 = img_raw_arr/img_raw_arr.mean()
+    img_arr = dpu.crop_center(img_arr_0, (160, 192, 160)) # crop
+    return img_arr
 
 def load_checkpoint(last_model_path, model, optimizer):
     if os.path.isfile(last_model_path):
@@ -26,6 +71,7 @@ def save_checkpoint(model_info_dir, trial_name, model, optimizer, epoch, best_lo
         'bad_epochs': bad_epochs,
         'val_info_history': val_info_history
     }
+    os.makedirs(model_info_dir, exist_ok=True)
     path = os.path.join(model_info_dir, trial_name + "_" + name + ".pth")
     torch.save(state_dict, path)
     print(f"Finish saving the {name} model.")

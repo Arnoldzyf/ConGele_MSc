@@ -3,16 +3,19 @@ search `?` for sth unsure
 search `!!` for unfinished work
 """
 
-from torch.utils.data import DataLoader
-import torch
+import os
 import argparse
 import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
 from sklearn.utils import shuffle
 from sklearn.metrics import silhouette_score
-import os
+from sklearn.model_selection import train_test_split
 
 from cVAE_utils import ContrastiveVAE
-from utils import plot_latent_features_2D, save_checkpoint, load_checkpoint, ConcatDataset
+from utils import plot_latent_features_2D, save_checkpoint, load_checkpoint, ConcatDataset, \
+    create_dataset_from_nii_path_list
 
 device = (
     "cuda"
@@ -30,11 +33,25 @@ def get_args():
     parser = argparse.ArgumentParser('contrastive VAE Model')
 
     # Add testing option while building the model
-    parser.add_argument('--build_test', default=True, type=bool,  ## ! change to false later
+    parser.add_argument('--build_test', default=False, type=bool,
                         help='use smaller data (-1,1,6,9,6) while building the model')
 
     # Add data arguments
-    parser.add_argument('--batch_size', default=20, type=int,
+    parser.add_argument('--target_df', default="./data_info/T1_MNI_20252_2_0/MDD_dataset_567.csv", type=str,
+                        help="path of the .csv file storing the target dataset info")
+    parser.add_argument('--background_df', default="./data_info/T1_MNI_20252_2_0/HC_dataset_567.csv", type=str,
+                        help="path of the .csv file storing the background dataset info")
+    parser.add_argument('--col_name_path', default="path", type=str,
+                        help="name of the column in target_df and background_df that stores .nii path")
+    parser.add_argument('--col_name_label', default="label", type=str,
+                        help="name of the column in target_df and background_df that stores disease type using integer")
+    parser.add_argument('--col_name_ID', default="f.eid", type=str,
+                        help="name of the column in target_df and background_df that stores subject ID")
+
+    parser.add_argument('--validation_ratio', default=0.2, type=float, ## ! no test set for now
+                        help="ratio of validation set w.r.t the whole dataset dataframe")
+
+    parser.add_argument('--batch_size', default=4, type=int,
                         help='maximum number of target or background samples in a batch')
 
     # Add model arguments
@@ -48,22 +65,22 @@ def get_args():
     parser.add_argument('--lr', default=0.0003, type=float, help='learning rate')
     parser.add_argument('--beta', default=1, type=float, help='scaling coefficient of KL loss')
     parser.add_argument('--gamma', default=1, type=float, help='scaling coefficient of TC loss')
-    parser.add_argument('--max-epoch', default=100, type=int,
+    parser.add_argument('--max_epoch', default=100, type=int,
                         help='force stop training at specified epoch')  ## ! change to 100 later
     parser.add_argument('--patience', default=3, type=int,  ## ! change to 10 later
                         help='number of epochs without improvement on validation set before early stopping')
 
     # Add logging/checkpoint arguments
-    parser.add_argument('--logging-interval', default=10, type=int,
+    parser.add_argument('--logging_interval', default=1, type=int,
                         help='the batch interval to print training loss')  ## ! change to 100 later
-    parser.add_argument('--plot-interval', default=1, type=int, help='the epoch interval to plot salient features '
+    parser.add_argument('--plot_interval', default=1, type=int, help='the epoch interval to plot salient features '
                                                                      'while validation')
-    parser.add_argument('--save-root-dir', default="./trained_cVAE", type=str,
-                        help='the directory to save all the models '
+    parser.add_argument('--save_root_dir', default="./trained_cVAE_3DCNN", type=str,
+                        help='the directory to save all the models (of the same type)'
                              'and their training info')
-    parser.add_argument('--trial-name', default="test0", type=str, help='the name of the current model, will be used '
+    parser.add_argument('--trial_name', default="test0", type=str, help='the name of the current model, will be used '
                                                                         'to store model and training info')
-    parser.add_argument('--save-interval', type=int, default=1, help='save a checkpoint every N epochs')
+    parser.add_argument('--save_interval', type=int, default=1, help='save a checkpoint every N epochs')
 
     # add sth later ...
 
@@ -110,10 +127,21 @@ def compute_loss(X_tg, X_bg, pred, disentangle, beta, gamma, batch_size):
     return loss_dict
 
 
-def cVAE_train(train_loader, cVAE, disentangle, optimizer, beta, gamma, batch_size, logging_interval):
+def cVAE_train(train_loader, cVAE, optimizer, args):
+
+    disentangle = args.disentangle
+    beta = args.beta
+    gamma = args.gamma
+    batch_size = args.batch_size
+    logging_interval = args.logging_interval
+
     size = len(train_loader.dataset)
     cVAE.train()
-    for batch, (X_tg, X_bg) in enumerate(train_loader):
+    for batch, (paths_tg, _, _, paths_bg, _, _) in enumerate(train_loader):
+        # obtain np array from path list, convert to torch.tensor
+        X_tg = torch.from_numpy(create_dataset_from_nii_path_list(paths_tg))
+        X_bg = torch.from_numpy(create_dataset_from_nii_path_list(paths_bg))
+
         current_batch_size = X_tg.shape[0]  # current batch size
 
         # convert data to float type and move it to cuda
@@ -137,12 +165,20 @@ def cVAE_train(train_loader, cVAE, disentangle, optimizer, beta, gamma, batch_si
                   f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
 
 
-def cVAE_validate(val_loader, cVAE, disentangle, beta, gamma, val_label, plot_interval=1, epoch=-1, plot_dir="./fig"):
+def cVAE_validate(val_loader, cVAE, args, val_label, epoch=-1, plot_dir="./fig"):
     """
     validation function of a epoch in the training loop
     can also plot the salient features
     return mean-batch-loss dict and ss score
+
+    !! ploting may need to count in background
     """
+
+    disentangle = args.disentangle
+    beta = args.beta
+    gamma = args.gamma
+    plot_interval = args.plot_interval
+
     num_batches = len(val_loader)
 
     cVAE.eval()
@@ -153,7 +189,11 @@ def cVAE_validate(val_loader, cVAE, disentangle, beta, gamma, val_label, plot_in
     s_mu_list = []  # for compute ss score and plotting for target dataset
 
     with torch.no_grad():  # no need back-prop when validating
-        for X_tg, X_bg in val_loader:
+        for paths_tg, _, _, paths_bg, _, _ in val_loader:
+            # obtain np array from path list, convert to torch.tensor
+            X_tg = torch.from_numpy(create_dataset_from_nii_path_list(paths_tg))
+            X_bg = torch.from_numpy(create_dataset_from_nii_path_list(paths_bg))
+
             current_batch_size = X_tg.shape[0]  # current batch size
 
             # convert data to float type and move it to cuda
@@ -174,7 +214,9 @@ def cVAE_validate(val_loader, cVAE, disentangle, beta, gamma, val_label, plot_in
                  for i in set(loss_dict)}
     # overall ss score for all validation target samples
     s_mu = torch.vstack(s_mu_list).cpu()
-    ss = silhouette_score(s_mu, val_label)
+    ss = -999
+    if len(set(val_label))>1:
+        ss = silhouette_score(s_mu, val_label)
 
     loss_dict['ss'] = ss
     info_dict = loss_dict
@@ -184,6 +226,7 @@ def cVAE_validate(val_loader, cVAE, disentangle, beta, gamma, val_label, plot_in
           f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
 
     # plot salient features
+    os.makedirs(plot_dir, exist_ok=True)
     if epoch % plot_interval == 0:
         plot_path = os.path.join(plot_dir, f"epoch-{epoch}.png")
         plot_latent_features_2D(mu=s_mu, label=val_label, ss=round(ss, 3), name='salient', run=False, path=plot_path)
@@ -198,11 +241,197 @@ def save_model(model, path):
     torch.save(model.state_dict(), path)
 
 
+def get_train_split_dataset_from_df_path(args):
+    """
+    - Take nii-storage-path and subject-ID
+    - Split train, val, test for target and background dataset
+    - col name of .nii path: "path", col name of disease labels: "status", col name of subject IDs: "f.eid"
+    - return dict: data{"target": {"paths_train": [...], "lables_train": [...], ......},
+                      "background": {......}}
+
+    - params: args --
+        tg_path: path of the .csv file storing target dataset
+        bg_path: path of the .csv file storing background dataset
+        val_rat: validation set ratio
+    """
+    tg_path = args.target_df
+    bg_path = args.background_df
+    val_rat = args.validation_ratio
+    col_path = args.col_name_path
+    col_label = args.col_name_label
+    col_ID = args.col_name_ID
+
+    ''' Func of splitting one dataframe to train, val, test set'''
+    def split_df(path):
+        # read in and shuffle the dataframe
+        df = pd.read_csv(path)
+
+        # get nii path and subject ID
+        nii_paths = df[col_path].tolist()
+        labels = df[col_label].tolist()
+        IDs = df[col_ID].tolist()
+
+        # split into train, val set
+        paths_train, paths_val, labels_train, labels_val, IDs_train, IDs_val \
+            = train_test_split(nii_paths, labels, IDs, test_size=val_rat, shuffle=True)
+
+        data = {"paths_train": paths_train, "paths_val": paths_val,
+                "labels_train": labels_train, "labels_val": labels_val,
+                "IDs_train": IDs_train, "IDs_val": IDs_val}
+        return data
+
+    tg_data = split_df(tg_path)
+    bg_data = split_df(bg_path)
+    data = {"target": tg_data, "background": bg_data}
+
+    return data
+
+
+def train_contrastive_VAE(args):
+    """
+    - Input:
+        - Two paths of .csv file for dataframe of target and background data info
+            - Need to set the size of target dataset and background dataset to be the same
+            - subject_ID, disease_type, nii_storage_path should have column names of "f.eid", "status", "path"
+
+    - saving path:
+        - args.save_root_dir
+                - args.trial_name
+                    - model_best.pth
+                    - model_last.pth
+                    - val_plot_salient
+                        - .png files
+                        - ...
+                    -
+                - args.trial_name
+    """
+    # get the device on which the model will be trained on
+    print(f"Using {device} device")
+
+    '''
+    initialize the path to save training info:
+    '''
+    # dir to save the current model info
+    model_info_dir = os.path.join(args.save_root_dir, args.trial_name)
+
+    # dir to save the plotted salient features when validating
+    plot_val_dir = os.path.join(model_info_dir, "val_plot_salient")
+
+    # path of a possible last checkpoint
+    last_model_path = os.path.join(model_info_dir, args.trial_name + "_last.pth")
+
+    '''
+    Get path and ID list and create dataloader
+    '''
+    dataset = get_train_split_dataset_from_df_path(args)
+
+    train_loader = DataLoader(
+        ConcatDataset(dataset["target"]["paths_train"], dataset["target"]["labels_train"], dataset["target"]["IDs_train"],
+                      dataset["background"]["paths_train"], dataset["background"]["labels_train"], dataset["target"]["IDs_train"]),
+        batch_size=args.batch_size, shuffle=True)  # parallelized shuffle
+    print(f"Load training data of size {len(train_loader.dataset)}")
+
+    val_loader = DataLoader(
+        ConcatDataset(dataset["target"]["paths_val"], dataset["target"]["labels_val"], dataset["target"]["IDs_val"],
+                      dataset["background"]["paths_val"], dataset["background"]["labels_val"], dataset["background"]["IDs_val"]),
+        batch_size=args.batch_size, shuffle=False)  # no need shuffle for inference, same order as in `dataset`
+    print(f"Load validation data of size {len(val_loader.dataset)}")
+
+    ''' 
+    Initialize the model, optimizer, and learning rate scheduler
+    '''
+    cVAE = ContrastiveVAE(salient_dim=args.s_dim, irrelevant_dim=args.z_dim, disentangle=args.disentangle,
+                          build_test=args.build_test)
+    cVAE = cVAE.to(device)
+    print("Built a model with {:d} parameters".format(sum(p.numel() for p in cVAE.parameters())))
+
+    optimizer = torch.optim.Adam(cVAE.parameters(), args.lr)  ## weight_decay=1e-5 ?
+    ## may add learning rate scheduler later ...
+
+    ''' 
+    Load last checkpoint if one exists
+    '''
+    state_dict = load_checkpoint(last_model_path, cVAE, optimizer)
+    if state_dict is not None:
+        last_epoch = state_dict["epoch"]
+        best_loss, bad_epochs = state_dict["best_loss"], state_dict["bad_epochs"]
+        val_info_history = state_dict["val_info_history"]
+    else:  # Initialize training params if its a new trail
+        last_epoch = -1
+        best_loss, bad_epochs = float('inf'), 0
+        val_info_history = {"reconst_loss_tg": [], "reconst_loss_bg": [], "reconst_loss": [],
+                            "KL_s_tg": [], "KL_z_tg": [], "KL_z_bg": [], "KL_loss": [],
+                            "TC_loss": [], "discriminator_loss": [],
+                            "loss": [],
+                            "ss": []}
+
+    '''
+    Start training
+    '''
+    print(f"Start training with batch size of {args.batch_size}")
+    for epoch in range(last_epoch + 1, args.max_epoch):
+        print(f"Epoch {epoch + 1} -------------------------------:")
+
+        #cVAE_train(train_loader=train_loader, cVAE=cVAE, optimizer=optimizer, args=args)
+
+        val_info = cVAE_validate(val_loader=val_loader, cVAE=cVAE, val_label=dataset["target"]["labels_val"],
+                                 epoch=epoch, args=args, plot_dir=plot_val_dir)
+        exit(-999)
+
+        # record validation loss
+        for key in set(val_info_history):
+            if key != 'ss':
+                new = val_info.get(key, None).cpu().item()
+            else:
+                new = val_info.get(key, None)
+            val_info_history.get(key, []).append(new)
+
+        # check whether to use early stop
+        early_stop = False
+        val_loss = val_info["loss"]
+        if val_loss < best_loss:
+            best_loss = val_loss
+            bad_epochs = 0
+            # save the best model so far
+            save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
+                            epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
+                            name="best")
+        else:
+            bad_epochs += 1
+        if bad_epochs >= args.patience:
+            early_stop = True
+
+        # Save checkpoints
+        if epoch % args.save_interval == 0:
+            name = "last"
+            if early_stop:
+                name = "final"
+            save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
+                            epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
+                            name=name)
+
+        # early stop
+        if early_stop:
+            print('No validation set improvements observed for {:d} epochs. Early stop!'.format(args.patience))
+            break
+        # force stop
+        if epoch == args.max_epoch - 1:
+            save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
+                            epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
+                            name="final")
+            print("! Reaching the maximum epoch number")
+
+    print("Done!")
+
+
 if __name__ == '__main__':
 
     # get args from bash command
     args = get_args()
     print(args)
+
+    train_contrastive_VAE(args)
+    exit(-999)
 
     # get the device on which the model will be trained on
     print(f"Using {device} device")
@@ -217,7 +446,7 @@ if __name__ == '__main__':
                     - .png files
                     - ...
                 - 
-            - model_save_path
+            - args.trial_name
             - ...
     '''
     # parent dir of the saved model

@@ -2,7 +2,7 @@
 
 run on all the UKBB HC and only_depression scans, the data is extracted on the fly
 
-please ignore create dataset section
+please ignore `HC dataset` and `MDD dataset` section
 
 
 
