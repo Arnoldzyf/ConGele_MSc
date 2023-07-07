@@ -1,8 +1,27 @@
+# `train_cVAE.sh`
+
+* bash file to train the cVAE model, not support testing for now
+  * use multiple GPU on fubini,
+  * support continue training,
+  * support early stop
+* related source files: `cVAE_trainer.py`, `utils.py`, `cVAE_utils.py` and SFCN repo code
+  * in `utils.py` please change the `SFCN_path` to your directory that contains SFCN repo code
+* related data files:
+  * `"./data_info/T1_MNI_20252_2_0/MDD_dataset_567.csv"`
+  * `"./data_info/T1_MNI_20252_2_0/HC_dataset_567.csv"`
+  * `.nii` files in `/disk/scratch/s2442138/data/T1_MNI_20252_2_0/` on fubini server
+* All the args to control training process are listed in the `get_args()` function in the `cVAE_trainer.py`.  Some important ones:
+  * `save_root_dir`： a place to store all the experiments
+  * `trial_name`: name of a specific experiments
+  * ...add later
+
+
+
 # `Inference_brain_age.ipynb`
 
 run on all the UKBB HC and only_depression scans, the data is extracted on the fly
 
-please ignore `HC dataset` and `MDD dataset` section
+（ please ignore `HC dataset` and `MDD dataset` section
 
 
 

@@ -96,10 +96,19 @@ def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', path=Non
     """
     if run:
         mu, _, _ = encoder(sample)
+
     # plot:
-    plt.figure()
-    plt.scatter(mu[:, 0], mu[:, 1], c=label, cmap='Accent')
-    plt.title(name + ', Silhouette score: ' + str(ss))
+    # plt.figure()
+    # plt.scatter(mu[:, 0], mu[:, 1], c=label, cmap='Accent')
+    # plt.title(name + ', Silhouette score: ' + str(ss))
+    # plt.legend()
+
+    fig, ax = plt.subplots()
+    scatter = ax.scatter(mu[:, 0], mu[:, 1], c=label, cmap='Accent')
+    legend1 = ax.legend(*scatter.legend_elements(),
+                        loc="upper left", title="Status")
+    ax.add_artist(legend1)
+
     if path is None:
         plt.show()
     else:

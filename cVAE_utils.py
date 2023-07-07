@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torchinfo import summary
 import numpy as np
+import math
 
 from utils import test_decoder, test_encoder, GaussianSampleLayer
 
@@ -144,22 +145,37 @@ class cVAE_discriminator(nn.Module):
             nn.Sigmoid())
 
     def forward(self, salient, irrelevant):
-        # split the batch of latent feature (row-wise)
         batch_size = salient.shape[0]
-        s1 = salient[:int(batch_size / 2), :]  # first half batch of the salient features
-        s2 = salient[int(batch_size / 2):, :]  # second half batch of the salient features
-        z1 = irrelevant[:int(batch_size / 2), :]  # first half batch of the irrelevant features
-        z2 = irrelevant[int(batch_size / 2):, :]  # second half batch of the irrelevant features
 
-        # sample from q joint
+        # build v: sample from q joint
         v = torch.hstack((salient, irrelevant))
-        # should --> 0
-        v_score = self.fc_block(v)  ## ? +1)*0.85 in CVAE-ASD repo
 
-        # sample from q prod
-        v_bar = torch.vstack((torch.hstack((s1, z2)), torch.hstack((s2, z1))))
-        # should --> 1
-        v_bar_score = self.fc_block(v_bar)  ## ? +1)*0.85 in CVAE-ASD repo
+        # build v_bar: sample from q prod
+        ## I think shuffle z can be more convenient here
+        if batch_size==1:
+            v_bar = torch.hstack((salient, irrelevant))
+        else:
+            # split the batch of latent feature (row-wise)
+            edge = int(math.ceil(batch_size / 2))
+            s1 = salient[:edge, :]  # first half batch of the salient features
+            s2 = salient[edge:, :]  # second half batch of the salient features
+            z1 = irrelevant[:edge, :]  # first half batch of the irrelevant features
+            z2 = irrelevant[edge:, :]  # second half batch of the irrelevant features
+
+            if batch_size % 2 == 1:  # handle the case when batch_size is not even
+                s0 = salient[0]
+                z0 = irrelevant[0]
+                s1 = s1[1:, :]
+                z1 = z1[1:, :]
+
+            v_bar = torch.vstack((torch.hstack((s1, z2)), torch.hstack((s2, z1))))
+            if batch_size % 2 == 1:
+                v_bar = torch.vstack((v_bar, torch.hstack((s0, z0))))
+                #print(v_bar.shape)
+        # calculate scores
+        v_score = self.fc_block(v)  # should --> 0
+        v_bar_score = self.fc_block(v_bar)  # should --> 1
+
         return v_score, v_bar_score
 
 
@@ -223,6 +239,7 @@ class ContrastiveVAE(nn.Module):
         '''
         # get salient features
         s_zero = torch.zeros_like(s_tg)
+        s_mu_bg, s_lv_bg, s_bg = self.salient_encoder(x_bg)  # won't be counted in loss, just for record
         # get irrelevant features
         z_mu_bg, z_lv_bg, z_bg = self.irrelevant_encoder(x_bg)
 
@@ -236,6 +253,7 @@ class ContrastiveVAE(nn.Module):
                        "z_mu_tg": z_mu_tg, "z_lv_tg": z_lv_tg, "z_tg": z_tg,
                        "reconst_tg": reconst_tg,
                        "v_score": v_score_tg, "v_bar_score": v_bar_score_tg,  # background have no v_(bar_)score
+                       "s_mu_bg": s_mu_bg, "s_lv_bg": s_lv_bg, "s_bg": s_bg,
                        "z_mu_bg": z_mu_bg, "z_lv_bg": z_lv_bg, "z_bg": z_bg,
                        "reconst_bg": reconst_bg}
         return output_dict
