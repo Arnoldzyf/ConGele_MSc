@@ -4,7 +4,9 @@ search `!!` for unfinished work
 """
 
 import os
+import sys
 import argparse
+import logging
 import numpy as np
 import pandas as pd
 import torch
@@ -15,15 +17,16 @@ from sklearn.model_selection import train_test_split
 
 from cVAE_utils import ContrastiveVAE
 from utils import plot_latent_features_2D, save_checkpoint, load_checkpoint, ConcatDataset, \
-    create_dataset_from_nii_path_list
+    create_dataset_from_nii_path_list, get_normalization_params, apply_normalization
 
 device = (
-    "cuda"
+    "cuda:4"
     if torch.cuda.is_available()
     else "mps"
     if torch.backends.mps.is_available()
     else "cpu"
 )
+gpus = [4,5,1]
 
 
 def get_args():
@@ -41,6 +44,7 @@ def get_args():
                         help="path of the .csv file storing the target dataset info")
     parser.add_argument('--background_df', default="./data_info/T1_MNI_20252_2_0/HC_dataset_567.csv", type=str,
                         help="path of the .csv file storing the background dataset info")
+
     parser.add_argument('--col_name_path', default="path", type=str,
                         help="name of the column in target_df and background_df that stores .nii path")
     parser.add_argument('--col_name_label', default="label", type=str,
@@ -50,11 +54,21 @@ def get_args():
 
     parser.add_argument('--validation_ratio', default=0.2, type=float, ## ! no test set for now
                         help="ratio of validation set w.r.t the whole dataset dataframe")
+    parser.add_argument('--random_state', default=42, type=int,
+                        help="set random state integer when splitting dataset")
+
+    parser.add_argument('--normalization_type', default="min-max", type=str,  # only min-max for now
+                        help="which kind of normalization to apply on the cropped data, "
+                             "can choose from 'min-max', 'None', 'min-max-2', ")
+    parser.add_argument('--enlarge', default=0.1, type=float,
+                        help="enlarge ratio of training set attributes when applying normalization")
 
     parser.add_argument('--batch_size', default=10, type=int,
                         help='maximum number of target (or background) samples in a batch, #sample = 2 * batch_size')
 
     # Add model arguments
+    parser.add_argument('--cVAE_type', default="asd", type=str,
+                        help="which model to use, can choose from 'default', 'asd', ")
     parser.add_argument('--s_dim', default=2, type=int, help='the dimension of a salient feature')
     parser.add_argument('--z_dim', default=6, type=int, help='the dimension of an irrelevant feature')
     parser.add_argument('--disentangle', default=True, type=bool,
@@ -63,6 +77,7 @@ def get_args():
 
     # Add optimization arguments
     parser.add_argument('--lr', default=0.0003, type=float, help='learning rate')
+    parser.add_argument('--alpha', default=1, type=float, help='scaling denominator of KL loss') # the larger the smaller
     parser.add_argument('--beta', default=1, type=float, help='scaling coefficient of KL loss')
     parser.add_argument('--gamma', default=1, type=float, help='scaling coefficient of TC loss')
     parser.add_argument('--max_epoch', default=100, type=int,
@@ -71,7 +86,7 @@ def get_args():
                         help='number of epochs without improvement on validation set before early stopping')
 
     # Add logging/checkpoint arguments
-    parser.add_argument('--logging_interval', default=5, type=int,
+    parser.add_argument('--logging_interval', default=25, type=int,
                         help='the batch interval to print training loss')  ## ! change to 100 later
     parser.add_argument('--plot_interval', default=1, type=int, help='the epoch interval to plot salient features '
                                                                      'while validation')
@@ -90,7 +105,7 @@ def get_args():
     return args
 
 
-def compute_loss(X_tg, X_bg, pred, disentangle, beta, gamma, batch_size):
+def compute_loss(X_tg, X_bg, pred, disentangle, alpha, beta, gamma, batch_size):
     """ compute the avg loss of a sample within a batch """
     # square error:
     reconst_loss_tg = ((pred["reconst_tg"] - X_tg) ** 2).sum() / batch_size
@@ -109,9 +124,9 @@ def compute_loss(X_tg, X_bg, pred, disentangle, beta, gamma, batch_size):
     # forcing independence
     TC_loss = 0  ## but TC loss is usually negative
     discriminator_loss = 0
-    if disentangle and batch_size != 1:
+    if disentangle:
         if pred["v_score"] is None or pred["v_bar_score"] is None:
-            print("Oops! None value returned by the discriminator ------------")
+            logging.info("Oops! None value returned by the discriminator ------------")
         else:
             # min v_score --> 0
             TC_loss = (torch.log(pred["v_score"]) - torch.log(1 - pred["v_score"])).sum() / batch_size
@@ -119,7 +134,7 @@ def compute_loss(X_tg, X_bg, pred, disentangle, beta, gamma, batch_size):
             discriminator_loss = (- torch.log(pred["v_score"]) - torch.log(1 - pred["v_bar_score"])).sum() / batch_size
 
     # average total loss of a sample
-    loss = reconst_loss + beta * KL_loss + gamma * TC_loss + discriminator_loss
+    loss = reconst_loss / alpha + beta * KL_loss + gamma * TC_loss + discriminator_loss
 
     loss_dict = {"reconst_loss_tg": reconst_loss_tg, "reconst_loss_bg": reconst_loss_bg, "reconst_loss": reconst_loss,
                  "KL_s_tg": KL_s_tg, "KL_z_tg": KL_z_tg, "KL_z_bg": KL_z_bg, "KL_loss": KL_loss,
@@ -129,30 +144,49 @@ def compute_loss(X_tg, X_bg, pred, disentangle, beta, gamma, batch_size):
     return loss_dict
 
 
-def cVAE_train(train_loader, cVAE, optimizer, args):
+def cVAE_train(train_loader, cVAE, optimizer, norm_params, args):
 
     disentangle = args.disentangle
     beta = args.beta
     gamma = args.gamma
+    alpha = args.alpha
     batch_size = args.batch_size
     logging_interval = args.logging_interval
+    norm_type = args.normalization_type
+    enlarge = args.enlarge
 
     size = len(train_loader.dataset)
     cVAE.train()
     for batch, (paths_tg, _, _, paths_bg, _, _) in enumerate(train_loader):
-        # obtain np array from path list, convert to torch.tensor
-        X_tg = torch.from_numpy(create_dataset_from_nii_path_list(paths_tg))
-        X_bg = torch.from_numpy(create_dataset_from_nii_path_list(paths_bg))
+        # obtain np array from path list
+        X_tg_arr = create_dataset_from_nii_path_list(paths_tg)
+        X_bg_arr = create_dataset_from_nii_path_list(paths_bg)
+        # normalizing inputs
+        X_tg_arr, X_bg_arr = apply_normalization(type=norm_type, params=norm_params,
+                                                 tg_samples=X_tg_arr, bg_samples=X_bg_arr, enlarge=enlarge)
+        # logging.info("------------")
+        # logging.info(X_tg_arr.min())
+        # logging.info(X_tg_arr.max())
+        # logging.info(X_bg_arr.min())
+        # logging.info(X_bg_arr.max())
+        # convert to tensor
+        X_tg = torch.from_numpy(X_tg_arr)
+        X_bg = torch.from_numpy(X_bg_arr)
 
-        current_batch_size = X_tg.shape[0]  # current batch size
+        # current batch size
+        current_batch_size = X_tg.shape[0]
 
         # convert data to float type and move it to cuda
         X_tg, X_bg = X_tg.type(torch.FloatTensor).to(device), X_bg.type(torch.FloatTensor).to(device)
 
         # Compute prediction error
         pred = cVAE(X_tg, X_bg)  # dict
-        loss = compute_loss(X_tg=X_bg, X_bg=X_bg, pred=pred, disentangle=disentangle, beta=beta, gamma=gamma,
+        print(pred["s_tg"].sum())
+        print(pred["z_tg"].sum())
+        loss = compute_loss(X_tg=X_bg, X_bg=X_bg, pred=pred, disentangle=disentangle,
+                            alpha=alpha, beta=beta, gamma=gamma,
                             batch_size=current_batch_size)  # dict per batch
+        #print(loss["loss"])
 
         # Backpropagation
         loss["loss"].backward()
@@ -162,12 +196,12 @@ def cVAE_train(train_loader, cVAE, optimizer, args):
         # logging
         if batch % logging_interval == 0:
             current = (batch + 1) * batch_size
-            print(f"loss: {loss['loss']:>7f}  [{current:>5d}/{size:>5d}] || "
-                  f"reconst_loss: {loss['reconst_loss']:>7f}, KL_loss: {loss['KL_loss']:>7f}, "
-                  f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
+            logging.info(f"Batched Train loss: {loss['loss']:>7f}  [{current:>5d}/{size:>5d}] || "
+                  f"reconst_loss: {loss['reconst_loss'] / alpha:>7f}, KL_loss: {loss['KL_loss'] * beta:>7f}, "
+                  f"TC_loss: {loss['TC_loss'] * gamma:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
 
 
-def cVAE_validate(val_loader, cVAE, args, epoch=-1, plot_dir="./fig"):
+def cVAE_validate(val_loader, cVAE, args, norm_params, epoch=-1, plot_dir="./fig"):
     """
     validation function of a epoch in the training loop
     can also plot the salient features
@@ -184,13 +218,18 @@ def cVAE_validate(val_loader, cVAE, args, epoch=-1, plot_dir="./fig"):
     """
 
     disentangle = args.disentangle
+    alpha = args.alpha
     beta = args.beta
     gamma = args.gamma
     plot_interval = args.plot_interval
     plot_background = args.plot_background
+    norm_type = args.normalization_type
+    enlarge = args.enlarge
+    logging_interval = args.logging_interval
+    batch_size = args.batch_size
 
     num_batches = len(val_loader)
-
+    size = len(val_loader.dataset)
     cVAE.eval()
     loss_dict = {"reconst_loss_tg": 0, "reconst_loss_bg": 0, "reconst_loss": 0,
                  "KL_s_tg": 0, "KL_z_tg": 0, "KL_z_bg": 0, "KL_loss": 0,
@@ -204,10 +243,21 @@ def cVAE_validate(val_loader, cVAE, args, epoch=-1, plot_dir="./fig"):
         val_bg_label = []
 
     with torch.no_grad():  # no need back-prop when validating
-        for paths_tg, labels_tg, _, paths_bg, labels_bg, _ in val_loader:
-            # obtain np array from path list, convert to torch.tensor
-            X_tg = torch.from_numpy(create_dataset_from_nii_path_list(paths_tg))
-            X_bg = torch.from_numpy(create_dataset_from_nii_path_list(paths_bg))
+        for batch, (paths_tg, labels_tg, _, paths_bg, labels_bg, _) in enumerate(val_loader):
+            # obtain np array from path list
+            X_tg_arr = create_dataset_from_nii_path_list(paths_tg)
+            X_bg_arr = create_dataset_from_nii_path_list(paths_bg)
+            # normalizing inputs
+            X_tg_arr, X_bg_arr = apply_normalization(type=norm_type, params=norm_params,
+                                                     tg_samples=X_tg_arr, bg_samples=X_bg_arr, enlarge=enlarge)
+            # logging.info("------------")
+            # logging.info(f"{X_tg_arr.min()} \t @{np.argwhere(X_tg_arr==X_tg_arr.min())[0]}")
+            # logging.info(f"{X_tg_arr.max()} \t @{np.argwhere(X_tg_arr==X_tg_arr.max())[0]}")
+            # logging.info(f"{X_bg_arr.min()} \t @{np.argwhere(X_bg_arr==X_bg_arr.min())[0]}")
+            # logging.info(f"{X_bg_arr.max()} \t @{np.argwhere(X_bg_arr==X_bg_arr.max())[0]}")
+            # convert to tensor
+            X_tg = torch.from_numpy(X_tg_arr)
+            X_bg = torch.from_numpy(X_bg_arr)
 
             current_batch_size = X_tg.shape[0]  # current batch size
 
@@ -216,8 +266,19 @@ def cVAE_validate(val_loader, cVAE, args, epoch=-1, plot_dir="./fig"):
 
             # Compute prediction error
             pred = cVAE(X_tg, X_bg)  # dict
-            loss = compute_loss(X_tg=X_tg, X_bg=X_bg, pred=pred, disentangle=disentangle, beta=beta, gamma=gamma,
+            print(pred["s_tg"].sum())
+            print(pred["z_tg"].sum())
+            loss = compute_loss(X_tg=X_tg, X_bg=X_bg, pred=pred, disentangle=disentangle,
+                                alpha=alpha, beta=beta, gamma=gamma,
                                 batch_size=current_batch_size)  # dict per batch
+            #print(loss['loss'])
+
+            # logging
+            if batch % logging_interval == 0:
+                current = (batch + 1) * batch_size
+                logging.info(f"Batched Validation loss: {loss['loss']:>7f}  [{current:>5d}/{size:>5d}] || "
+                             f"reconst_loss: {loss['reconst_loss'] / alpha:>7f}, KL_loss: {loss['KL_loss'] * beta:>7f}, "
+                             f"TC_loss: {loss['TC_loss'] * gamma:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
 
             # accumulate loss value and means of salient features
             loss_dict = {i: loss_dict.get(i, 0) + loss.get(i, 0)
@@ -227,6 +288,12 @@ def cVAE_validate(val_loader, cVAE, args, epoch=-1, plot_dir="./fig"):
             if plot_background:
                 s_mu_bg_list.append(pred["s_mu_bg"])
                 val_bg_label.extend(labels_bg.tolist())
+
+            # print("=================")
+            # print('tg: ------------')
+            # print(pred["s_mu_tg"])
+            # print('bg: ------------')
+            # print(pred["s_mu_bg"])
 
     # avg batch loss for each epoch
     loss_dict = {i: loss_dict.get(i) / num_batches
@@ -240,7 +307,7 @@ def cVAE_validate(val_loader, cVAE, args, epoch=-1, plot_dir="./fig"):
     loss_dict['ss'] = ss
     info_dict = loss_dict
 
-    print(f"Validation --- loss: {loss['loss']:>7f}  ss:{ss:>7f} || "
+    logging.info(f"Final Validation --- loss: {loss['loss']:>7f}  ss:{ss:>7f} || "
           f"reconst_loss: {loss['reconst_loss']:>7f}, KL_loss: {loss['KL_loss']:>7f}, "
           f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
 
@@ -253,10 +320,11 @@ def cVAE_validate(val_loader, cVAE, args, epoch=-1, plot_dir="./fig"):
         s_mu = torch.cat((s_mu_bg, s_mu_tg), 0)
         plot_label = val_bg_label
         plot_label.extend(val_tg_label)
-    #print(len(plot_label))
+        ss = silhouette_score(s_mu, plot_label)
+    print(len(s_mu))
     if epoch % plot_interval == 0:
         plot_path = os.path.join(plot_dir, f"epoch-{epoch}.png")
-        plot_latent_features_2D(mu=s_mu, label=plot_label, ss=round(ss, 3), name='salient', run=False, path=plot_path)
+        plot_latent_features_2D(mu=s_mu, label=plot_label, ss=ss, loss=loss['loss'], name='salient', run=False, path=plot_path, epoch=epoch)
 
     return info_dict
 
@@ -287,10 +355,11 @@ def get_train_split_dataset_from_df_path(args):
     col_path = args.col_name_path
     col_label = args.col_name_label
     col_ID = args.col_name_ID
+    random_state = args.random_state
 
     ''' Func of splitting one dataframe to train, val, test set'''
     def split_df(path):
-        # read in and shuffle the dataframe
+        # read in the dataframe
         df = pd.read_csv(path)
 
         # get nii path and subject ID
@@ -300,9 +369,9 @@ def get_train_split_dataset_from_df_path(args):
 
         # split into train, val set
         paths_train, paths_val, labels_train, labels_val, IDs_train, IDs_val \
-            = train_test_split(nii_paths, labels, IDs, test_size=val_rat, shuffle=True)
+            = train_test_split(nii_paths, labels, IDs, test_size=val_rat, shuffle=True, random_state=random_state)
 
-        data = {"paths_train": paths_train, "paths_val": paths_val,
+        data = {"paths_train": paths_train[:50], "paths_val": paths_val[:20],
                 "labels_train": labels_train, "labels_val": labels_val,
                 "IDs_train": IDs_train, "IDs_val": IDs_val}
         return data
@@ -333,7 +402,7 @@ def train_contrastive_VAE(args):
                 - args.trial_name
     """
     # get the device on which the model will be trained on
-    print(f"Using {device} device")
+    logging.info(f"Using {device} device")
 
     '''
     initialize the path to save training info:
@@ -348,30 +417,38 @@ def train_contrastive_VAE(args):
     last_model_path = os.path.join(model_info_dir, args.trial_name + "_last.pth")
 
     '''
-    Get path and ID list and create dataloader
+    Obtain dataset (path, label, ID list) and create dataloader
     '''
-    dataset = get_train_split_dataset_from_df_path(args)
+    dataset = get_train_split_dataset_from_df_path(args)  # contain random shuffling
 
     train_loader = DataLoader(
         ConcatDataset(dataset["target"]["paths_train"], dataset["target"]["labels_train"], dataset["target"]["IDs_train"],
-                      dataset["background"]["paths_train"], dataset["background"]["labels_train"], dataset["target"]["IDs_train"]),
+                      dataset["background"]["paths_train"], dataset["background"]["labels_train"], dataset["background"]["IDs_train"]),
         batch_size=args.batch_size, shuffle=True, num_workers=3)  # parallelized shuffle
-    print(f"Load training data of size 2 * {len(train_loader.dataset)}")
+    logging.info(f"Load training data of size 2 * {len(train_loader.dataset)}")
 
     val_loader = DataLoader(
         ConcatDataset(dataset["target"]["paths_val"], dataset["target"]["labels_val"], dataset["target"]["IDs_val"],
                       dataset["background"]["paths_val"], dataset["background"]["labels_val"], dataset["background"]["IDs_val"]),
-        batch_size=args.batch_size, shuffle=False, num_workers=3)  # no need shuffle for inference, same order as in `dataset`
-    print(f"Load validation data of size 2 * {len(val_loader.dataset)}")
+        batch_size=args.batch_size, shuffle=False, num_workers=3)  # no need shuffle for inference
+    logging.info(f"Load validation data of size 2 * {len(val_loader.dataset)}")
+
+    '''
+    Get normalization arguments
+    '''
+    # ! need to re-obtain params if args.random_state changes during splitting the dataset above
+    norm_dict = get_normalization_params(tg_train_path=dataset["target"]["paths_train"],
+                                         bg_train_path=dataset["background"]["paths_train"],
+                                         model_info_dir=model_info_dir, type=args.normalization_type)
 
     ''' 
     Initialize the model, optimizer, and learning rate scheduler
     '''
     cVAE = ContrastiveVAE(salient_dim=args.s_dim, irrelevant_dim=args.z_dim, disentangle=args.disentangle,
-                          build_test=args.build_test)
-    cVAE = torch.nn.DataParallel(cVAE)
+                          build_test=args.build_test, model_type=args.cVAE_type)
+    cVAE = torch.nn.DataParallel(cVAE, device_ids=gpus)
     cVAE = cVAE.to(device)
-    print("Built a model with {:d} parameters".format(sum(p.numel() for p in cVAE.parameters())))
+    logging.info("Built a model with {:d} parameters".format(sum(p.numel() for p in cVAE.parameters())))
 
     optimizer = torch.optim.Adam(cVAE.parameters(), args.lr)  ## weight_decay=1e-5 ?
     ## may add learning rate scheduler later ...
@@ -396,13 +473,13 @@ def train_contrastive_VAE(args):
     '''
     Start training ============================================================================
     '''
-    print(f"Start training with batch size of {args.batch_size}")
+    logging.info(f"Start training with batch size of {args.batch_size}")
     for epoch in range(last_epoch + 1, args.max_epoch):
-        print(f"Epoch {epoch} -------------------------------:")
+        logging.info(f"Epoch {epoch} -------------------------------:")
 
-        cVAE_train(train_loader=train_loader, cVAE=cVAE, optimizer=optimizer, args=args)
+        cVAE_train(train_loader=train_loader, cVAE=cVAE, norm_params=norm_dict, optimizer=optimizer, args=args)
 
-        val_info = cVAE_validate(val_loader=val_loader, cVAE=cVAE,
+        val_info = cVAE_validate(val_loader=val_loader, cVAE=cVAE, norm_params=norm_dict,
                                  epoch=epoch, args=args, plot_dir=plot_val_dir)
 
         # record validation loss
@@ -439,25 +516,40 @@ def train_contrastive_VAE(args):
 
         # early stop
         if early_stop:
-            print('No validation set improvements observed for {:d} epochs. Early stop!'.format(args.patience))
+            logging.info('No validation loss improvements observed for {:d} epochs. Early stop!'.format(args.patience))
             break
         # force stop
         if epoch == args.max_epoch - 1:
             save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
                             epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
                             name="final")
-            print("! Reaching the maximum epoch number")
+            logging.info("! Reaching the maximum epoch number")
 
-    print("Done!")
+    logging.info("Done!")
 
 
 if __name__ == '__main__':
 
     # get args from bash command
     args = get_args()
-    print(args)
+
+    # dir to save the current model info
+    model_info_dir = os.path.join(args.save_root_dir, args.trial_name)
+    os.makedirs(model_info_dir, exist_ok=True)
+    # log
+    log_file = os.path.join(model_info_dir, "logging.txt")
+    handlers = [logging.StreamHandler(), logging.FileHandler(log_file, mode='a')]
+    logging.basicConfig(handlers=handlers, format='[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S',
+                        level=logging.INFO)
+
+    logging.info("! start logging -------")
+    logging.info(f"! Model: {model_info_dir}")
+    logging.info(args)
 
     train_contrastive_VAE(args)
+
+    # sys.stdout = orig_stdout
+    # f.close()
 
 
 

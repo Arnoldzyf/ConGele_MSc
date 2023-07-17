@@ -13,8 +13,134 @@ import matplotlib.pyplot as plt
 import os
 from sklearn.linear_model import LinearRegression
 import nibabel as nib
+import logging
 
 from dp_model import dp_utils as dpu
+
+
+def apply_normalization(type, params, tg_samples, bg_samples, enlarge):
+
+    def enlarge_range(min, max, enlarge):
+        """
+        enlarge min-max range
+            enlarge > 0 : expand range
+            enlarge < 0: shrink
+        """
+        middle = (min + max) / 2
+        radius = (max - min) / 2
+        up = middle + radius * (1 + enlarge)
+        down = middle - radius * (1 + enlarge)
+        return down, up
+
+    if type=="min-max" or type == "min-max-2":
+        # target dataset
+        tg_min, tg_max = enlarge_range(params["tg_arr_train_min"], params["tg_arr_train_max"], enlarge)
+        tg_denominator = tg_max - tg_min
+        tg_normed = np.divide((tg_samples - tg_min), tg_denominator + np.finfo(np.float64).eps)
+        # divide where denominator is non-zero
+        #tg_normed = np.divide((tg_samples - tg_min), tg_denominator, where=(tg_denominator != 0.0))
+
+        # background dataset
+        bg_min, bg_max = enlarge_range(params["bg_arr_train_min"], params["bg_arr_train_max"], enlarge)
+        bg_denominator = bg_max - bg_min
+        bg_normed = np.divide((bg_samples - bg_min), bg_denominator + np.finfo(np.float64).eps)
+        #bg_normed = np.divide((bg_samples - bg_min), bg_denominator, where=(bg_denominator != 0.0))
+        return tg_normed, bg_normed
+    elif type == "None":
+        return tg_samples, bg_samples
+    else:
+        logging.info("!! Ooops -- Applying undefined Normalization type")
+        return tg_samples, bg_samples
+
+
+def get_normalization_params(tg_train_path=[], bg_train_path=[], model_info_dir="", type="min-max"):
+    """
+    Should use data in training set
+    "min-max": voxel-wise
+    "min-max-2": global min max
+    """
+
+    # no normalization
+    if type == "None":
+        return
+    # create dir to save normalization parameters
+    params_dir = os.path.join(model_info_dir, type)
+    os.makedirs(params_dir, exist_ok=True)
+
+    def get_min_max_from_nii_path_list(paths):
+        min = max = create_dataset_from_nii_path_list(paths[0:1])
+        shape = max.shape
+        for path in paths:
+            current = create_dataset_from_nii_path_list([path])
+            min = np.vstack([current, min.reshape(shape)]).min(axis=0)
+            max = np.vstack([current, max.reshape(shape)]).max(axis=0)
+        return min, max
+
+    def get_global_min_max_from_nii_path_list(paths):
+        init = create_dataset_from_nii_path_list(paths[0:1])
+        min, max = init.min(), init.max()
+        for path in paths:
+            current = create_dataset_from_nii_path_list([path])
+            current_min, current_max = current.min(), current.max()
+            if current_min < min:
+                min = current_min
+            if current_max > max:
+                max = current_max
+        return min, max
+
+
+    if type == "min-max" or type == "min-max-2":
+        # params for target set
+        tg_arr_train_min_path = os.path.join(params_dir, "tg_arr_train_min.npy")
+        tg_arr_train_max_path = os.path.join(params_dir, "tg_arr_train_max.npy")
+        if os.path.isfile(tg_arr_train_min_path) and os.path.isfile(tg_arr_train_max_path):
+            with open(tg_arr_train_min_path, 'rb') as f:
+                tg_arr_train_min = np.load(f)
+            with open(tg_arr_train_max_path, 'rb') as f:
+                tg_arr_train_max = np.load(f)
+        else:
+            ## for some unknown reason read in all the array cannot give correct min max
+            # tg_arr_train = create_dataset_from_nii_path_list(tg_train_path)  # too large?
+            # tg_arr_train_min = tg_arr_train.min(axis=0)  # shape: (1, 160, 192, 160)
+            # tg_arr_train_max = tg_arr_train.max(axis=0)
+            if type == "min-max":
+                tg_arr_train_min, tg_arr_train_max = get_min_max_from_nii_path_list(tg_train_path)
+            elif type == "min-max-2":
+                tg_arr_train_min, tg_arr_train_max = get_global_min_max_from_nii_path_list(tg_train_path)
+            with open(tg_arr_train_min_path, 'wb') as f:
+                np.save(f, tg_arr_train_min)
+            with open(tg_arr_train_max_path, 'wb') as f:
+                np.save(f, tg_arr_train_max)
+
+        # params for background set
+        bg_arr_train_min_path = os.path.join(params_dir, "bg_arr_train_min.npy")
+        bg_arr_train_max_path = os.path.join(params_dir, "bg_arr_train_max.npy")
+        if os.path.isfile(bg_arr_train_min_path) and os.path.isfile(bg_arr_train_max_path):
+            with open(bg_arr_train_min_path, 'rb') as f:
+                bg_arr_train_min = np.load(f)
+            with open(bg_arr_train_max_path, 'rb') as f:
+                bg_arr_train_max = np.load(f)
+        else:
+            ## for some unknown reason read in all the array cannot give correct min max
+            # bg_arr_train = create_dataset_from_nii_path_list(bg_train_path)  # too large?
+            # bg_arr_train_min = bg_arr_train.min(axis=0)  # shape: (1, 160, 192, 160)
+            # bg_arr_train_max = bg_arr_train.max(axis=0)
+            if type == "min-max":
+                bg_arr_train_min, bg_arr_train_max = get_min_max_from_nii_path_list(bg_train_path)
+            elif type == "min-max-2":
+                bg_arr_train_min, bg_arr_train_max = get_global_min_max_from_nii_path_list(bg_train_path)
+            with open(bg_arr_train_min_path, 'wb') as f:
+                np.save(f, bg_arr_train_min)
+            with open(bg_arr_train_max_path, 'wb') as f:
+                np.save(f, bg_arr_train_max)
+
+        # get param dict
+        params = {"tg_arr_train_min": tg_arr_train_min, "tg_arr_train_max": tg_arr_train_max,
+                  "bg_arr_train_min": bg_arr_train_min, "bg_arr_train_max": bg_arr_train_max}
+        return params
+    else:
+        logging.info("!! Ooops -- Using undefined Normalization type")
+        return None
 
 
 def create_dataset_from_nii_path_list(path_list):
@@ -52,12 +178,13 @@ def obtain_arr_from_nii(path):
     img_arr = dpu.crop_center(img_arr_0, (160, 192, 160)) # crop
     return img_arr
 
+
 def load_checkpoint(last_model_path, model, optimizer):
     if os.path.isfile(last_model_path):
         state_dict = torch.load(last_model_path)
         model.load_state_dict(state_dict['model'])
         optimizer.load_state_dict(state_dict['optimizer'])
-        print('Loaded from a previous saved model {}'.format(last_model_path))
+        logging.info('Loaded from a previous saved model {}'.format(last_model_path))
         return state_dict
 
 
@@ -74,7 +201,7 @@ def save_checkpoint(model_info_dir, trial_name, model, optimizer, epoch, best_lo
     os.makedirs(model_info_dir, exist_ok=True)
     path = os.path.join(model_info_dir, trial_name + "_" + name + ".pth")
     torch.save(state_dict, path)
-    print(f"Finish saving the {name} model.")
+    logging.info(f"Finish saving the {name} model.")
 
 
 class ConcatDataset(torch.utils.data.Dataset):
@@ -88,8 +215,8 @@ class ConcatDataset(torch.utils.data.Dataset):
         return min(len(d) for d in self.datasets)
 
 
-def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', path=None,
-                            run=False, encoder=None, sample=None):
+def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', epoch=0, path=None,
+                            run=False, encoder=None, sample=None,loss=-1):
     """
     use mean value inferred by encoder and sample labels to plot
     if run = True, take in encoder and samples and infer mean; otherwise take in mean value directly
@@ -108,6 +235,7 @@ def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', path=Non
     legend1 = ax.legend(*scatter.legend_elements(),
                         loc="upper left", title="Status")
     ax.add_artist(legend1)
+    ax.set_title(f"epoch: {epoch} | Silhouette score: {ss:>7f} | loss: {loss:>7f}")
 
     if path is None:
         plt.show()

@@ -3,8 +3,125 @@ from torch import nn
 from torchinfo import summary
 import numpy as np
 import math
+import logging
 
 from utils import test_decoder, test_encoder, GaussianSampleLayer
+
+
+conv_shape_asd = [-1, 256, 10, 12, 10]
+flattened_dim_asd = np.prod(conv_shape_asd) * -1
+
+class cVAE_encoder_asd(nn.Module):
+    """
+    https://github.com/sccnlab/pub-CVAE-MRI-ASD/blob/main/Notebooks/make_models2.py
+    """
+    def __init__(self, intermediate_dim=128, latent_dim=2, use_bias=True):
+        super().__init__()
+
+        filters = 16
+        kernel_size = 3
+
+        self.conv_block_1 = nn.Sequential(
+            nn.Conv3d(1, filters*2, kernel_size=kernel_size, stride=2, padding=(1,1,1), bias=use_bias),
+            nn.BatchNorm3d(filters*2),
+            nn.ReLU())
+        self.conv_block_2 = nn.Sequential(
+            nn.Conv3d(filters*2, filters * 4, kernel_size=kernel_size, stride=2, padding=(1,1,1), bias=use_bias),
+            nn.BatchNorm3d(filters * 4),
+            nn.ReLU())
+        self.conv_block_3 = nn.Sequential(
+            nn.Conv3d(filters * 4, filters * 8, kernel_size=kernel_size, stride=2, padding=(1, 1, 1),
+                      bias=use_bias),
+            nn.BatchNorm3d(filters * 8),
+            nn.ReLU())
+        self.conv_block_4 = nn.Sequential(
+            nn.Conv3d(filters * 8, filters * 16, kernel_size=kernel_size, stride=2, padding=(1, 1, 1),
+                      bias=use_bias),
+            nn.BatchNorm3d(filters * 16),
+            nn.ReLU())
+
+        self.fc_block = nn.Sequential(
+            nn.Linear(flattened_dim_asd, intermediate_dim, bias=use_bias),
+            nn.ReLU())
+
+        self.fc_mean_block = nn.Sequential(
+            nn.Linear(intermediate_dim, latent_dim, bias=use_bias))
+
+        self.fc_log_var_block = nn.Sequential(
+            nn.Linear(intermediate_dim, latent_dim, bias=use_bias))
+
+        self.sample_block = GaussianSampleLayer()
+
+    def forward(self, x):
+        h = self.conv_block_1(x)  # [1, 64, 80, 96, 80]
+        h = self.conv_block_2(h)  # [1, 128, 40, 48, 40]
+        h = self.conv_block_3(h)  # [1, 256, 20, 24, 20]
+        h = self.conv_block_4(h)  # [1, 512, 10, 12, 10]
+
+        # flatten the hidden feature and convert to intermediate vec
+        h = h.view(h.size(0), -1)
+        h = self.fc_block(h)
+
+        # Infer the mean
+        mean = self.fc_mean_block(h)
+
+        # Infer the log variance
+        log_var = self.fc_log_var_block(h)
+
+        # Sample the feature vector
+        f = self.sample_block(mean, log_var)
+        return mean, log_var, f
+
+
+class cVAE_decoder_asd(nn.Module):
+    """
+    https://github.com/sccnlab/pub-CVAE-MRI-ASD/blob/main/Notebooks/make_models2.py
+    """
+
+    def __init__(self, intermediate_dim=128, latent_dim=8, use_bias=True):
+        super().__init__()
+
+        filters = 16
+        kernel_size = 3
+
+        self.fc_block = nn.Sequential(
+            nn.Linear(latent_dim, intermediate_dim, bias=use_bias),
+            nn.ReLU(),
+            nn.Linear(intermediate_dim, flattened_dim_asd, bias=use_bias),
+            nn.ReLU())
+
+        self.trans_conv_block1 = nn.Sequential(
+            nn.ConvTranspose3d(in_channels=filters*16, out_channels=filters*8, kernel_size=kernel_size, stride=2, padding=0, output_padding=1, bias=use_bias),
+            nn.BatchNorm3d(num_features=filters*8),
+            nn.ReLU())
+        self.trans_conv_block2 = nn.Sequential(
+            nn.ConvTranspose3d(in_channels=filters*8, out_channels=filters*4, kernel_size=kernel_size, stride=2, padding=3, output_padding=1, bias=use_bias),
+            nn.BatchNorm3d(num_features=filters*4),
+            nn.ReLU())
+        self.trans_conv_block3 = nn.Sequential(
+            nn.ConvTranspose3d(in_channels=filters*4, out_channels=filters*2, kernel_size=kernel_size, stride=2, padding=0, output_padding=0,
+                               bias=use_bias),
+            nn.BatchNorm3d(num_features=filters*2),
+            nn.ReLU())
+        self.trans_conv_block4 = nn.Sequential(
+            nn.ConvTranspose3d(in_channels=filters*2, out_channels=1, kernel_size=kernel_size, stride=2, padding=2, output_padding=1,
+                               bias=use_bias),
+            nn.BatchNorm3d(num_features=1),
+            nn.Sigmoid())
+
+    def forward(self, salient, irrelevant):
+        f = torch.hstack((salient, irrelevant))
+        # print(f.shape)
+
+        h = self.fc_block(f)
+        h = h.view(conv_shape_asd)
+
+        h = self.trans_conv_block1(h)
+        h = self.trans_conv_block2(h)
+        h = self.trans_conv_block3(h)
+        reconstructed_x = self.trans_conv_block4(h)
+        return reconstructed_x
+
 
 conv_shape = [-1, 512, 3, 4, 3]
 flattened_dim = np.prod(conv_shape) * -1
@@ -112,12 +229,12 @@ class cVAE_decoder(nn.Module):
             nn.ConvTranspose3d(in_channels=128, out_channels=64, kernel_size=[6, 9, 6], stride=3, padding=1,
                                bias=use_bias),
             nn.BatchNorm3d(num_features=64),
-            nn.ReLU())
+            nn.Sigmoid())
         self.trans_conv_block4 = nn.Sequential(
             nn.ConvTranspose3d(in_channels=64, out_channels=1, kernel_size=[10, 12, 10], stride=5, padding=0,
                                bias=use_bias),
             nn.BatchNorm3d(num_features=1),
-            nn.ReLU())  ## ?? need to pre-process the input range to >=0
+            nn.Sigmoid())
 
     def forward(self, salient, irrelevant):
         f = torch.hstack((salient, irrelevant))
@@ -181,19 +298,32 @@ class cVAE_discriminator(nn.Module):
 
 class ContrastiveVAE(nn.Module):
     def __init__(self, intermediate_dim=128, salient_dim=2, irrelevant_dim=6, disentangle=True, use_bias=True,
-                 build_test=False):
+                 build_test=False, model_type="asd"):
         super().__init__()
 
-        self.salient_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
-                                            use_bias=use_bias)
-        self.irrelevant_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
-                                               use_bias=use_bias)
-
-        self.decoder = cVAE_decoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim + irrelevant_dim,
-                                    use_bias=True)
+        if model_type == "asd":
+            self.salient_encoder = cVAE_encoder_asd(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
+                                                use_bias=use_bias)
+            self.irrelevant_encoder = cVAE_encoder_asd(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
+                                                   use_bias=use_bias)
+            self.decoder = cVAE_decoder_asd(intermediate_dim=intermediate_dim, latent_dim=salient_dim + irrelevant_dim,
+                                        use_bias=True)
+            logging.info("Creating cVAE of type 'asd'")
+        elif model_type == "default":
+            self.salient_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim,
+                                                use_bias=use_bias)
+            self.irrelevant_encoder = cVAE_encoder(intermediate_dim=intermediate_dim, latent_dim=irrelevant_dim,
+                                                   use_bias=use_bias)
+            self.decoder = cVAE_decoder(intermediate_dim=intermediate_dim, latent_dim=salient_dim + irrelevant_dim,
+                                        use_bias=True)
+            logging.info("Creating cVAE of type 'default'")
+        else:
+            logging.info("!! ERROR -- Using undefined model type!")
+            exit(-777)
 
         self.discriminator = None
         if disentangle:
+            logging.info("Creating discriminator")
             self.discriminator = cVAE_discriminator(latent_dim=salient_dim + irrelevant_dim)
 
         self.disentangle = disentangle
@@ -230,8 +360,7 @@ class ContrastiveVAE(nn.Module):
         # disentangle: force the independence between the salient and the irrelevant features.
         v_score_tg, v_bar_score_tg = None, None
         batch_size = s_tg.shape[0]
-        # no disentangle if there's only one sample in a batch
-        if batch_size != 1 and self.disentangle:  # no need self.training
+        if self.disentangle:  # no need self.training or batch_size!=1
             v_score_tg, v_bar_score_tg = self.discriminator(s_tg, z_tg)
 
         ''' 
@@ -267,11 +396,11 @@ if __name__ == '__main__':
     s_dim = 2
     z_dim = 6  # increasing the size of irrelevant features can help with the result
 
-    # enc = cVAE_encoder()
+    # enc = cVAE_encoder_asd()
     # print(enc)
     # summary(enc, input_size=(batch_size, 1, 160, 192, 160))
 
-    # dec = cVAE_decoder()
+    # dec = cVAE_decoder_asd()
     # print(dec)
     # summary(dec, input_size=((batch_size, s_dim), (batch_size, z_dim)))
 
@@ -279,6 +408,6 @@ if __name__ == '__main__':
     # print(disc)
     # summary(disc, input_size=((batch_size, s_dim), (batch_size, z_dim)))
 
-    cVAE = ContrastiveVAE(salient_dim=s_dim, irrelevant_dim=z_dim)
-    print(cVAE)
+    cVAE = ContrastiveVAE(salient_dim=s_dim, irrelevant_dim=z_dim, model_type="asd")
+    #print(cVAE)
     summary(cVAE, input_size=((batch_size, 1, 160, 192, 160), (batch_size, 1, 160, 192, 160)))
