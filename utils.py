@@ -14,11 +14,12 @@ import os
 from sklearn.linear_model import LinearRegression
 import nibabel as nib
 import logging
+import umap
 
 from dp_model import dp_utils as dpu
 
 
-def apply_normalization(type, params, tg_samples, bg_samples, enlarge):
+def apply_normalization(type, params, tg_samples, bg_samples, enlarge=0.1):
 
     def enlarge_range(min, max, enlarge):
         """
@@ -32,7 +33,20 @@ def apply_normalization(type, params, tg_samples, bg_samples, enlarge):
         down = middle - radius * (1 + enlarge)
         return down, up
 
-    if type=="min-max" or type == "min-max-2":
+    if type in ["min-max-3", "min-max-4"]:
+        if type == "min-max-3":
+            min, max = enlarge_range(params["all_train_min"], params["all_train_max"], enlarge)
+        elif type == "min-max-4":
+            min, max = params["all_train_min"], params["all_train_max"]
+        denominator = max - min
+        tg_normed = np.divide((tg_samples - min), denominator + np.finfo(np.float64).eps)
+        bg_normed = np.divide((bg_samples - min), denominator + np.finfo(np.float64).eps)
+
+        # print(f"train min: {params['all_train_min']:>10f}  |  train max: {params['all_train_max']:>10f}")
+        # print(f"train low: {min:>10f}  |  train up : {max:>10f}")
+        return tg_normed, bg_normed
+
+    elif type in ["min-max", "min-max-2"]:
         # target dataset
         tg_min, tg_max = enlarge_range(params["tg_arr_train_min"], params["tg_arr_train_max"], enlarge)
         tg_denominator = tg_max - tg_min
@@ -45,6 +59,12 @@ def apply_normalization(type, params, tg_samples, bg_samples, enlarge):
         bg_denominator = bg_max - bg_min
         bg_normed = np.divide((bg_samples - bg_min), bg_denominator + np.finfo(np.float64).eps)
         #bg_normed = np.divide((bg_samples - bg_min), bg_denominator, where=(bg_denominator != 0.0))
+
+        # if type == "min-max-2":
+        #     print(f"tg train min: {params['tg_arr_train_min']:>10f}  |  tg train max: {params['tg_arr_train_max']:>10f}")
+        #     print(f"tg train low: {tg_min:>10f}  |  tg train up : {tg_max:>10f}")
+        #     print(f"bg train min: {params['bg_arr_train_min']:>10f}  |  bg train max: {params['bg_arr_train_max']:>10f}")
+        #     print(f"bg train low: {bg_min:>10f}  |  bg train up : {bg_max:>10f}")
         return tg_normed, bg_normed
     elif type == "None":
         return tg_samples, bg_samples
@@ -56,8 +76,10 @@ def apply_normalization(type, params, tg_samples, bg_samples, enlarge):
 def get_normalization_params(tg_train_path=[], bg_train_path=[], model_info_dir="", type="min-max"):
     """
     Should use data in training set
-    "min-max": voxel-wise
-    "min-max-2": global min max
+    "min-max": voxel-wise, applied with enlarge for var set
+    "min-max-2": global min max for target and background separately, applied with enlarge for val set
+    "min-max-3": global min max for both target and background, applied with enlarge for val set
+    "min-max-4": global min max for both target and background, take 99.5%~max for max and 0.5%~min for min
     """
 
     # no normalization
@@ -88,8 +110,49 @@ def get_normalization_params(tg_train_path=[], bg_train_path=[], model_info_dir=
                 max = current_max
         return min, max
 
+    def get_min_max_list_from_nii_path_list(paths):
+        min_list=[]
+        max_list=[]
+        for path in paths:
+            current = create_dataset_from_nii_path_list([path])
+            min_list.append(current.min())
+            max_list.append(current.max())
+        return min_list, max_list
 
-    if type == "min-max" or type == "min-max-2":
+    if type in ["min-max-3", "min-max-4"]:
+        all_train_path = tg_train_path
+        all_train_path.extend(bg_train_path)
+
+        all_train_min_path = os.path.join(params_dir, "all_train_min.npy")
+        all_train_max_path = os.path.join(params_dir, "all_train_max.npy")
+
+        if os.path.isfile(all_train_min_path) and os.path.isfile(all_train_max_path):
+            with open(all_train_min_path, 'rb') as f:
+                all_train_min = np.load(f)
+            with open(all_train_max_path, 'rb') as f:
+                all_train_max = np.load(f)
+        else:
+            if type == "min-max-3":
+                all_train_min, all_train_max = get_global_min_max_from_nii_path_list(all_train_path)
+                with open(all_train_min_path, 'wb') as f:
+                    np.save(f, all_train_min)
+                with open(all_train_max_path, 'wb') as f:
+                    np.save(f, all_train_max)
+            elif type == "min-max-4":
+                all_train_min_list, all_train_max_list = get_min_max_list_from_nii_path_list(all_train_path)
+                # print(all_train_max_list)
+                all_train_min = np.percentile(all_train_min_list, 0.5)
+                all_train_max = np.percentile(all_train_max_list, 99.5)
+            with open(all_train_min_path, 'wb') as f:
+                np.save(f, all_train_min)
+            with open(all_train_max_path, 'wb') as f:
+                np.save(f, all_train_max)
+
+        params = {"all_train_min": all_train_min, "all_train_max": all_train_max}
+
+        return params
+
+    elif type in ["min-max", "min-max-2"]:
         # params for target set
         tg_arr_train_min_path = os.path.join(params_dir, "tg_arr_train_min.npy")
         tg_arr_train_max_path = os.path.join(params_dir, "tg_arr_train_max.npy")
@@ -172,10 +235,10 @@ def obtain_arr_from_nii(path):
     # extract nii object
     img = nib.load(path)
     # extract raw arr data
-    img_raw_arr = img.get_fdata()
+    img_arr = img.get_fdata()
     # preprocess
-    img_arr_0 = img_raw_arr/img_raw_arr.mean()
-    img_arr = dpu.crop_center(img_arr_0, (160, 192, 160)) # crop
+    img_arr = img_arr/img_arr.mean()
+    img_arr = dpu.crop_center(img_arr, (160, 192, 160)) # crop
     return img_arr
 
 
@@ -188,7 +251,8 @@ def load_checkpoint(last_model_path, model, optimizer):
         return state_dict
 
 
-def save_checkpoint(model_info_dir, trial_name, model, optimizer, epoch, best_loss, bad_epochs, val_info_history, name):
+def save_checkpoint(model_info_dir, trial_name, model, optimizer, epoch, best_loss, bad_epochs, val_info_history,
+                    train_info_history, name):
     " name: best/last/final "
     state_dict = {
         'model': model.state_dict(),
@@ -196,10 +260,11 @@ def save_checkpoint(model_info_dir, trial_name, model, optimizer, epoch, best_lo
         'epoch': epoch,
         'best_loss': best_loss,
         'bad_epochs': bad_epochs,
-        'val_info_history': val_info_history
+        'val_info_history': val_info_history,
+        'train_info_history': train_info_history
     }
     os.makedirs(model_info_dir, exist_ok=True)
-    path = os.path.join(model_info_dir, trial_name + "_" + name + ".pth")
+    path = os.path.join(model_info_dir, "model_" + name + ".pth")
     torch.save(state_dict, path)
     logging.info(f"Finish saving the {name} model.")
 
@@ -215,7 +280,44 @@ class ConcatDataset(torch.utils.data.Dataset):
         return min(len(d) for d in self.datasets)
 
 
-def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', epoch=0, path=None,
+def plot_training_process(train_info_history, val_info_history, plot_info_history, path):
+    epochs = np.arange(0, len(train_info_history))
+
+    left = 5
+    right = len(epochs)
+
+    if len(epochs)+3<left:
+        return
+
+    fig, ax1 = plt.subplots()
+    lns1 = ax1.plot(epochs[left:right], train_info_history[left:right], label='training loss', color='g')
+    lns2 = ax1.plot(epochs[left:right], val_info_history[left:right], label='validation loss', color='r')
+    ax1.set_ylabel('loss')
+    ax1.set_xlabel('epochs')
+    # ax1.legend()
+
+    ax2 = ax1.twinx()
+    lns3 = ax2.plot(epochs[left:right], plot_info_history[left:right], label='silhouette score', color='b')
+    ax2.set_ylabel('score')
+    # ax2.legend(loc='upper left')
+
+    # add legend
+    lns = lns1 + lns2 + lns3
+    labs = [l.get_label() for l in lns]
+    ax1.legend(lns, labs)
+
+    plt.title(f'cVAE training process - epoch {len(epochs)}')
+
+    fig.tight_layout()
+
+    dir = os.path.dirname(path)
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', epoch=-1, path=None,
                             run=False, encoder=None, sample=None,loss=-1):
     """
     use mean value inferred by encoder and sample labels to plot
@@ -230,8 +332,14 @@ def plot_latent_features_2D(mu=[0], label=[0], ss=-999, name='salient', epoch=0,
     # plt.title(name + ', Silhouette score: ' + str(ss))
     # plt.legend()
 
+    #print(mu.shape[1])
+    if mu.shape[1] == 2:
+        emb = mu
+    else:
+        reducer = umap.UMAP()
+        emb = reducer.fit_transform(mu)
     fig, ax = plt.subplots()
-    scatter = ax.scatter(mu[:, 0], mu[:, 1], c=label, cmap='Accent')
+    scatter = ax.scatter(emb[:, 0], emb[:, 1], c=label, cmap='Accent')
     legend1 = ax.legend(*scatter.legend_elements(),
                         loc="upper left", title="Status")
     ax.add_artist(legend1)
@@ -263,7 +371,9 @@ class GaussianSampleLayer(nn.Module):
         """
         std = torch.sqrt(torch.exp(lv))
         eps = torch.randn_like(std)
-        sample = eps.mul(std).add(mu)
+        #sample = eps.mul(std).add(mu)
+
+        sample = eps.mul(torch.exp(0.5 * lv)).add(mu)
         return sample
 
 def bias_correction(y: np.ndarray, y_pred: np.ndarray):

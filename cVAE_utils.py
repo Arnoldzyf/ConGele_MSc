@@ -255,11 +255,20 @@ class cVAE_discriminator(nn.Module):
     no use when batch_size=1
     """
 
-    def __init__(self, latent_dim=8):
+    def __init__(self, latent_dim=8, batch_norm=True):
         super().__init__()
-        self.fc_block = nn.Sequential(
-            nn.Linear(latent_dim, 1),
-            nn.Sigmoid())
+
+        self.batch_norm = batch_norm
+
+        if batch_norm:
+            self.fc = nn.Linear(latent_dim, 1)
+            self.bn = nn.BatchNorm1d(num_features=1)
+            self.prob = nn.Sigmoid()
+        else:
+            self.fc_block = nn.Sequential(
+                nn.Linear(latent_dim, 1),
+                # nn.BatchNorm1d(num_features=1), # cannot handle batch size = 1 # to prevent Function 'SigmoidBackward0' returned nan values in its 0th output.
+                nn.Sigmoid())
 
     def forward(self, salient, irrelevant):
         batch_size = salient.shape[0]
@@ -289,16 +298,24 @@ class cVAE_discriminator(nn.Module):
             if batch_size % 2 == 1:
                 v_bar = torch.vstack((v_bar, torch.hstack((s0, z0))))
                 #print(v_bar.shape)
+
         # calculate scores
-        v_score = self.fc_block(v)  # should --> 0
-        v_bar_score = self.fc_block(v_bar)  # should --> 1
-
+        if self.batch_norm:
+            v_score = self.fc(v)
+            v_bar_score = self.fc(v_bar)
+            if batch_size != 1:
+                v_score = self.bn(v_score)
+                v_bar_score = self.bn(v_bar_score)
+            v_score = self.prob(v_score)
+            v_bar_score = self.prob(v_bar_score)
+        else:
+            v_score = self.fc_block(v)  # should --> 0
+            v_bar_score = self.fc_block(v_bar)  # should --> 1
         return v_score, v_bar_score
-
 
 class ContrastiveVAE(nn.Module):
     def __init__(self, intermediate_dim=128, salient_dim=2, irrelevant_dim=6, disentangle=True, use_bias=True,
-                 build_test=False, model_type="asd"):
+                 build_test=False, model_type="asd", disc_BN=True):
         super().__init__()
 
         if model_type == "asd":
@@ -324,7 +341,7 @@ class ContrastiveVAE(nn.Module):
         self.discriminator = None
         if disentangle:
             logging.info("Creating discriminator")
-            self.discriminator = cVAE_discriminator(latent_dim=salient_dim + irrelevant_dim)
+            self.discriminator = cVAE_discriminator(latent_dim=salient_dim + irrelevant_dim, batch_norm=disc_BN)
 
         self.disentangle = disentangle
 
@@ -390,24 +407,27 @@ class ContrastiveVAE(nn.Module):
     def get_salient_encoder(self):
         return self.salient_encoder
 
+    def get_decoder(self):
+        return self.decoder
+
 
 if __name__ == '__main__':
-    batch_size = 1  ##! batch_size==2 will lead to cuda out of memory...
-    s_dim = 2
-    z_dim = 6  # increasing the size of irrelevant features can help with the result
+    batch_size = 2  ##! batch_size==2 will lead to cuda out of memory...
+    s_dim = 32
+    z_dim = 32  # increasing the size of irrelevant features can help with the result
 
-    # enc = cVAE_encoder_asd()
-    # print(enc)
+    # enc = cVAE_encoder_asd(latent_dim=s_dim)
+    #print(enc)
     # summary(enc, input_size=(batch_size, 1, 160, 192, 160))
 
-    # dec = cVAE_decoder_asd()
+    dec = cVAE_decoder_asd(latent_dim=s_dim+z_dim)
     # print(dec)
-    # summary(dec, input_size=((batch_size, s_dim), (batch_size, z_dim)))
+    summary(dec, input_size=((batch_size, s_dim), (batch_size, z_dim)))
 
     # disc = cVAE_discriminator()
     # print(disc)
     # summary(disc, input_size=((batch_size, s_dim), (batch_size, z_dim)))
 
-    cVAE = ContrastiveVAE(salient_dim=s_dim, irrelevant_dim=z_dim, model_type="asd")
-    #print(cVAE)
-    summary(cVAE, input_size=((batch_size, 1, 160, 192, 160), (batch_size, 1, 160, 192, 160)))
+    # cVAE = ContrastiveVAE(salient_dim=s_dim, irrelevant_dim=z_dim, model_type="asd")
+    # print(cVAE)
+    # summary(cVAE, input_size=((batch_size, 1, 160, 192, 160), (batch_size, 1, 160, 192, 160)))

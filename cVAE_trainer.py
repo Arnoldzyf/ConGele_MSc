@@ -16,17 +16,17 @@ from sklearn.metrics import silhouette_score
 from sklearn.model_selection import train_test_split
 
 from cVAE_utils import ContrastiveVAE
-from utils import plot_latent_features_2D, save_checkpoint, load_checkpoint, ConcatDataset, \
-    create_dataset_from_nii_path_list, get_normalization_params, apply_normalization
+from utils import *
 
 device = (
-    "cuda:4"
+    #"cuda"
+    "cuda:1"
     if torch.cuda.is_available()
     else "mps"
     if torch.backends.mps.is_available()
     else "cpu"
 )
-gpus = [4,5,1]
+gpus = [1,3,0]
 
 
 def get_args():
@@ -59,7 +59,7 @@ def get_args():
 
     parser.add_argument('--normalization_type', default="min-max", type=str,  # only min-max for now
                         help="which kind of normalization to apply on the cropped data, "
-                             "can choose from 'min-max', 'None', 'min-max-2', ")
+                             "can choose from 'min-max', 'None', 'min-max-2', 'min-max-3'")
     parser.add_argument('--enlarge', default=0.1, type=float,
                         help="enlarge ratio of training set attributes when applying normalization")
 
@@ -71,7 +71,7 @@ def get_args():
                         help="which model to use, can choose from 'default', 'asd', ")
     parser.add_argument('--s_dim', default=2, type=int, help='the dimension of a salient feature')
     parser.add_argument('--z_dim', default=6, type=int, help='the dimension of an irrelevant feature')
-    parser.add_argument('--disentangle', default=True, type=bool,
+    parser.add_argument('--disentangle', default=1, type=int,
                         help='whether to force independence between salient and irrelevant features of the target set '
                              'while training')
 
@@ -84,13 +84,24 @@ def get_args():
                         help='force stop training at specified epoch')  ## ! change to 100 later
     parser.add_argument('--patience', default=7, type=int,  ## ! change to 10 later
                         help='number of epochs without improvement on validation set before early stopping')
+    parser.add_argument('--min_step', default=0.05, type=float,
+                        help='minimum val loss decrease interval before early stopping')
+    parser.add_argument('--KL_annealing', default=0, type=int,
+                        help='whether to use Cyclical Annealing Schedule on KL beta while optimizing')
+    parser.add_argument('--cycle', default=40, type=int,
+                        help='length of each cycle for Cyclical Annealing Schedule')
+    parser.add_argument('--explode', default=4, type=int,
+                        help='length of each cycle for Cyclical Annealing Schedule')
+    parser.add_argument('--rae', default=0, type=int,
+                        help='whether to use squre L2 norm to replace kl loss')
+
 
     # Add logging/checkpoint arguments
     parser.add_argument('--logging_interval', default=25, type=int,
                         help='the batch interval to print training loss')  ## ! change to 100 later
     parser.add_argument('--plot_interval', default=1, type=int, help='the epoch interval to plot salient features '
                                                                      'while validation')
-    parser.add_argument('--plot_background', default=True, type=bool, help='whether to consider background samples '
+    parser.add_argument('--plot_background', default=1, type=int, help='whether to consider background samples '
                                                                            'when plotting in the validation stage')
     parser.add_argument('--save_root_dir', default="./trained_cVAE_3DCNN", type=str,
                         help='the directory to save all the models (of the same type)'
@@ -98,6 +109,7 @@ def get_args():
     parser.add_argument('--trial_name', default="test0", type=str, help='the name of the current model, will be used '
                                                                         'to store model and training info')
     parser.add_argument('--save_interval', type=int, default=1, help='save a checkpoint every N epochs')
+    parser.add_argument('--plot_loss_interval', default=10, type=int, help='the epoch interval to plot training process')
 
     # add sth later ...
 
@@ -105,7 +117,7 @@ def get_args():
     return args
 
 
-def compute_loss(X_tg, X_bg, pred, disentangle, alpha, beta, gamma, batch_size):
+def compute_loss(X_tg, X_bg, pred, disentangle, alpha, beta, gamma, batch_size, rae=0):
     """ compute the avg loss of a sample within a batch """
     # square error:
     reconst_loss_tg = ((pred["reconst_tg"] - X_tg) ** 2).sum() / batch_size
@@ -121,9 +133,22 @@ def compute_loss(X_tg, X_bg, pred, disentangle, alpha, beta, gamma, batch_size):
             1 + pred["z_lv_bg"] - torch.exp(pred["z_lv_bg"]) - torch.square(pred["z_mu_bg"]))).sum() / batch_size
     KL_loss = KL_s_tg + KL_z_tg + KL_z_bg
 
+    # implement rae instead, KL loss --> l2 norm on s and z
+    if rae == 1:
+        s_tg_loss = (0.5 * torch.square(pred["s_tg"])).sum() / batch_size
+        z_tg_loss = (0.5 * torch.square(pred["z_tg"])).sum() / batch_size
+        z_bg_loss = (0.5 * torch.square(pred["z_bg"])).sum() / batch_size
+        f_loss =s_tg_loss + z_tg_loss + z_bg_loss
+
+        KL_s_tg = s_tg_loss
+        KL_z_tg = z_tg_loss
+        KL_z_bg = z_bg_loss
+        KL_loss = f_loss
+
     # forcing independence
     TC_loss = 0  ## but TC loss is usually negative
     discriminator_loss = 0
+    v_acc, v_bar_acc, v_score_mean, v_bar_score_mean = -1, -1, -1, -1
     if disentangle:
         if pred["v_score"] is None or pred["v_bar_score"] is None:
             logging.info("Oops! None value returned by the discriminator ------------")
@@ -133,13 +158,21 @@ def compute_loss(X_tg, X_bg, pred, disentangle, alpha, beta, gamma, batch_size):
             # max v_score --> 1, min v_bar_score --> 0
             discriminator_loss = (- torch.log(pred["v_score"]) - torch.log(1 - pred["v_bar_score"])).sum() / batch_size
 
+            # compute accuracy
+            v_acc = (pred["v_score"] > 0.5).sum() / batch_size
+            v_bar_acc = (pred["v_bar_score"] < 0.5).sum() / batch_size
+            # record mean
+            v_score_mean = pred["v_score"].sum() / batch_size
+            v_bar_score_mean = pred["v_bar_score"].sum() / batch_size
+
     # average total loss of a sample
-    loss = reconst_loss / alpha + beta * KL_loss + gamma * TC_loss + discriminator_loss
+    loss = reconst_loss / (160 * 192 * 160) * alpha + beta * KL_loss + gamma * TC_loss + discriminator_loss
 
     loss_dict = {"reconst_loss_tg": reconst_loss_tg, "reconst_loss_bg": reconst_loss_bg, "reconst_loss": reconst_loss,
                  "KL_s_tg": KL_s_tg, "KL_z_tg": KL_z_tg, "KL_z_bg": KL_z_bg, "KL_loss": KL_loss,
                  "TC_loss": TC_loss, "discriminator_loss": discriminator_loss,
-                 "loss": loss}
+                 "loss": loss,
+                 "v_acc": v_acc, "v_bar_acc": v_bar_acc, "v_score_mean": v_score_mean, "v_bar_score_mean": v_bar_score_mean}
 
     return loss_dict
 
@@ -154,6 +187,13 @@ def cVAE_train(train_loader, cVAE, optimizer, norm_params, args):
     logging_interval = args.logging_interval
     norm_type = args.normalization_type
     enlarge = args.enlarge
+
+    num_batches = len(train_loader)
+    loss_dict = {"reconst_loss_tg": 0, "reconst_loss_bg": 0, "reconst_loss": 0,
+                 "KL_s_tg": 0, "KL_z_tg": 0, "KL_z_bg": 0, "KL_loss": 0,
+                 "TC_loss": 0, "discriminator_loss": 0,
+                 "loss": 0,
+                 "v_acc": 0, "v_bar_acc": 0, "v_score_mean": 0, "v_bar_score_mean": 0}
 
     size = len(train_loader.dataset)
     cVAE.train()
@@ -181,11 +221,11 @@ def cVAE_train(train_loader, cVAE, optimizer, norm_params, args):
 
         # Compute prediction error
         pred = cVAE(X_tg, X_bg)  # dict
-        print(pred["s_tg"].sum())
-        print(pred["z_tg"].sum())
+        # print(pred["s_tg"].mean())
+        # print(pred["z_tg"].mean())
         loss = compute_loss(X_tg=X_bg, X_bg=X_bg, pred=pred, disentangle=disentangle,
                             alpha=alpha, beta=beta, gamma=gamma,
-                            batch_size=current_batch_size)  # dict per batch
+                            batch_size=current_batch_size, rae=args.rae)  # dict per batch
         #print(loss["loss"])
 
         # Backpropagation
@@ -196,9 +236,27 @@ def cVAE_train(train_loader, cVAE, optimizer, norm_params, args):
         # logging
         if batch % logging_interval == 0:
             current = (batch + 1) * batch_size
+            if current > size:
+                current = size
+            # logging.info(f"Batched Train loss: {loss['loss']:>7f}  [{current:>5d}/{size:>5d}] || "
+            #       f"reconst_loss: {loss['reconst_loss'] / (160 * 192 * 160) * alpha:>7f}, KL_loss: {loss['KL_loss'] * beta:>7f}, "
+            #       f"TC_loss: {loss['TC_loss'] * gamma:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
             logging.info(f"Batched Train loss: {loss['loss']:>7f}  [{current:>5d}/{size:>5d}] || "
-                  f"reconst_loss: {loss['reconst_loss'] / alpha:>7f}, KL_loss: {loss['KL_loss'] * beta:>7f}, "
-                  f"TC_loss: {loss['TC_loss'] * gamma:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
+                         f"reconst_loss: {loss['reconst_loss'] / (160 * 192 * 160):>7f}, KL_loss: {loss['KL_loss']:>7f}, "
+                         f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
+
+        # accumulate loss
+        loss_dict = {i: loss_dict.get(i, 0) + loss.get(i, 0)
+                     for i in set(loss_dict)}
+
+    # avg batch loss for each epoch
+    loss_dict = {i: loss_dict.get(i) / num_batches
+                 for i in set(loss_dict)}
+
+
+    logging.info(f"v_score_mean: {loss_dict['v_score_mean']}; v_bar_score_mean: {loss_dict['v_bar_score_mean']}  |  v_acc: {loss_dict['v_acc']:>5f}; v_bar_acc: {loss_dict['v_bar_acc']:5f}")
+
+    return loss_dict
 
 
 def cVAE_validate(val_loader, cVAE, args, norm_params, epoch=-1, plot_dir="./fig"):
@@ -213,8 +271,9 @@ def cVAE_validate(val_loader, cVAE, args, norm_params, epoch=-1, plot_dir="./fig
 
     If plot_background = True, will add salient features of background scans in plotting,
 
-    !! The ss score will always only consider target samples.
-        If only one class in target dataset, the ss will bes set to -999
+    !! The ss score in logging info only considers target samples.
+            If only one class in target dataset, the ss will bes set to -999
+        Whether the ss score in plots considers backgound depend on whether to plot background
     """
 
     disentangle = args.disentangle
@@ -234,7 +293,8 @@ def cVAE_validate(val_loader, cVAE, args, norm_params, epoch=-1, plot_dir="./fig
     loss_dict = {"reconst_loss_tg": 0, "reconst_loss_bg": 0, "reconst_loss": 0,
                  "KL_s_tg": 0, "KL_z_tg": 0, "KL_z_bg": 0, "KL_loss": 0,
                  "TC_loss": 0, "discriminator_loss": 0,
-                 "loss": 0}
+                 "loss": 0,
+                 "v_acc": 0, "v_bar_acc": 0, "v_score_mean": 0, "v_bar_score_mean": 0}
     s_mu_tg_list = []  # for compute ss score and plotting for target dataset
     val_tg_label = []
 
@@ -266,19 +326,24 @@ def cVAE_validate(val_loader, cVAE, args, norm_params, epoch=-1, plot_dir="./fig
 
             # Compute prediction error
             pred = cVAE(X_tg, X_bg)  # dict
-            print(pred["s_tg"].sum())
-            print(pred["z_tg"].sum())
+            # print(pred["s_tg"].mean())
+            # print(pred["z_tg"].mean())
             loss = compute_loss(X_tg=X_tg, X_bg=X_bg, pred=pred, disentangle=disentangle,
                                 alpha=alpha, beta=beta, gamma=gamma,
-                                batch_size=current_batch_size)  # dict per batch
+                                batch_size=current_batch_size, rae=args.rae)  # dict per batch
             #print(loss['loss'])
 
             # logging
             if batch % logging_interval == 0:
                 current = (batch + 1) * batch_size
+                if current > size:
+                    current = size
+                # logging.info(f"Batched Validation loss: {loss['loss']:>7f}  [{current:>5d}/{size:>5d}] || "
+                #              f"reconst_loss: {loss['reconst_loss'] / (160 * 192 * 160) * alpha:>7f}, KL_loss: {loss['KL_loss'] * beta:>7f}, "
+                #              f"TC_loss: {loss['TC_loss'] * gamma:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
                 logging.info(f"Batched Validation loss: {loss['loss']:>7f}  [{current:>5d}/{size:>5d}] || "
-                             f"reconst_loss: {loss['reconst_loss'] / alpha:>7f}, KL_loss: {loss['KL_loss'] * beta:>7f}, "
-                             f"TC_loss: {loss['TC_loss'] * gamma:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
+                             f"reconst_loss: {loss['reconst_loss'] / (160 * 192 * 160):>7f}, KL_loss: {loss['KL_loss']:>7f}, "
+                             f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
 
             # accumulate loss value and means of salient features
             loss_dict = {i: loss_dict.get(i, 0) + loss.get(i, 0)
@@ -307,9 +372,12 @@ def cVAE_validate(val_loader, cVAE, args, norm_params, epoch=-1, plot_dir="./fig
     loss_dict['ss'] = ss
     info_dict = loss_dict
 
-    logging.info(f"Final Validation --- loss: {loss['loss']:>7f}  ss:{ss:>7f} || "
-          f"reconst_loss: {loss['reconst_loss']:>7f}, KL_loss: {loss['KL_loss']:>7f}, "
-          f"TC_loss: {loss['TC_loss']:>7f}, discriminator_loss: {loss['discriminator_loss']:>7f}")
+    # logging.info(f"Final Validation --- loss: {info_dict['loss']:>7f}  ss:{ss:>7f} || "
+    #       f"reconst_loss: {info_dict['reconst_loss'] / (160 * 192 * 160) * alpha:>7f}, KL_loss: {info_dict['KL_loss'] * beta:>7f}, "
+    #       f"TC_loss: {info_dict['TC_loss'] * gamma:>7f}, discriminator_loss: {info_dict['discriminator_loss']:>7f}")
+    logging.info(f"Final Validation --- loss: {info_dict['loss']:>7f}  ss:{ss:>7f} || "
+                 f"reconst_loss: {info_dict['reconst_loss'] / (160 * 192 * 160):>7f}, KL_loss: {info_dict['KL_loss']:>7f}, "
+                 f"TC_loss: {info_dict['TC_loss']:>7f}, discriminator_loss: {info_dict['discriminator_loss']:>7f}")
 
     # plot salient features
     os.makedirs(plot_dir, exist_ok=True)
@@ -321,11 +389,13 @@ def cVAE_validate(val_loader, cVAE, args, norm_params, epoch=-1, plot_dir="./fig
         plot_label = val_bg_label
         plot_label.extend(val_tg_label)
         ss = silhouette_score(s_mu, plot_label)
-    print(len(s_mu))
+    #print(s_mu.shape)
     if epoch % plot_interval == 0:
-        plot_path = os.path.join(plot_dir, f"epoch-{epoch}.png")
-        plot_latent_features_2D(mu=s_mu, label=plot_label, ss=ss, loss=loss['loss'], name='salient', run=False, path=plot_path, epoch=epoch)
+        plot_path = os.path.join(plot_dir, f"epoch-{epoch}-features.png")
+        plot_latent_features_2D(mu=s_mu, label=plot_label, ss=ss, loss=info_dict['loss'], name='salient', run=False, path=plot_path, epoch=epoch)
+        logging.info(f"ss in plot: {ss:>7f}")
 
+    info_dict["ss-plot"]=ss
     return info_dict
 
 
@@ -371,7 +441,7 @@ def get_train_split_dataset_from_df_path(args):
         paths_train, paths_val, labels_train, labels_val, IDs_train, IDs_val \
             = train_test_split(nii_paths, labels, IDs, test_size=val_rat, shuffle=True, random_state=random_state)
 
-        data = {"paths_train": paths_train[:50], "paths_val": paths_val[:20],
+        data = {"paths_train": paths_train[:480], "paths_val": paths_val[:120],
                 "labels_train": labels_train, "labels_val": labels_val,
                 "IDs_train": IDs_train, "IDs_val": IDs_val}
         return data
@@ -412,9 +482,10 @@ def train_contrastive_VAE(args):
 
     # dir to save the plotted salient features when validating
     plot_val_dir = os.path.join(model_info_dir, "val_plot_salient")
+    plot_loss_dir = os.path.join(model_info_dir, "train_val_loss_plot")
 
     # path of a possible last checkpoint
-    last_model_path = os.path.join(model_info_dir, args.trial_name + "_last.pth")
+    last_model_path = os.path.join(model_info_dir, "model_last.pth")
 
     '''
     Obtain dataset (path, label, ID list) and create dataloader
@@ -447,12 +518,15 @@ def train_contrastive_VAE(args):
     cVAE = ContrastiveVAE(salient_dim=args.s_dim, irrelevant_dim=args.z_dim, disentangle=args.disentangle,
                           build_test=args.build_test, model_type=args.cVAE_type)
     cVAE = torch.nn.DataParallel(cVAE, device_ids=gpus)
+    #cVAE = torch.nn.DataParallel(cVAE)
     cVAE = cVAE.to(device)
     logging.info("Built a model with {:d} parameters".format(sum(p.numel() for p in cVAE.parameters())))
 
     optimizer = torch.optim.Adam(cVAE.parameters(), args.lr)  ## weight_decay=1e-5 ?
     ## may add learning rate scheduler later ...
 
+    if args.rae==1:
+        logging.info("using rae L2 norm instead of KL loss")
     ''' 
     Load last checkpoint if one exists
     '''
@@ -461,6 +535,7 @@ def train_contrastive_VAE(args):
         last_epoch = state_dict["epoch"]
         best_loss, bad_epochs = state_dict["best_loss"], state_dict["bad_epochs"]
         val_info_history = state_dict["val_info_history"]
+        train_info_history = state_dict["train_info_history"]
     else:  # Initialize training params if its a new trail
         last_epoch = -1
         best_loss, bad_epochs = float('inf'), 0
@@ -468,51 +543,122 @@ def train_contrastive_VAE(args):
                             "KL_s_tg": [], "KL_z_tg": [], "KL_z_bg": [], "KL_loss": [],
                             "TC_loss": [], "discriminator_loss": [],
                             "loss": [],
-                            "ss": []}
+                            "ss": [], "ss-plot":[],
+                            "v_acc": [], "v_bar_acc": [], "v_score_mean": [], "v_bar_score_mean": []}
+        train_info_history = {"reconst_loss_tg": [], "reconst_loss_bg": [], "reconst_loss": [],
+                            "KL_s_tg": [], "KL_z_tg": [], "KL_z_bg": [], "KL_loss": [],
+                            "TC_loss": [], "discriminator_loss": [],
+                            "loss": [],
+                            "v_acc": [], "v_bar_acc": [], "v_score_mean": [], "v_bar_score_mean": []}
 
     '''
     Start training ============================================================================
     '''
     logging.info(f"Start training with batch size of {args.batch_size}")
+
+    if args.KL_annealing == 1:
+        beta = args.beta
+
     for epoch in range(last_epoch + 1, args.max_epoch):
         logging.info(f"Epoch {epoch} -------------------------------:")
 
-        cVAE_train(train_loader=train_loader, cVAE=cVAE, norm_params=norm_dict, optimizer=optimizer, args=args)
+        if epoch >= args.explode:
+            if args.KL_annealing==1:
+                mod = (epoch-args.explode) % args.cycle
+                if mod < (args.cycle/2):
+                    args.beta = mod * beta / args.cycle * 2
+                else:
+                    args.beta=beta
+                logging.info(f"annealing KL beta: {args.beta}")
+
+        train_info = cVAE_train(train_loader=train_loader, cVAE=cVAE, norm_params=norm_dict, optimizer=optimizer, args=args)
 
         val_info = cVAE_validate(val_loader=val_loader, cVAE=cVAE, norm_params=norm_dict,
                                  epoch=epoch, args=args, plot_dir=plot_val_dir)
 
+        # record train loss
+        for key in set(train_info_history):
+            if args.disentangle !=0 or key not in ['TC_loss', 'discriminator_loss', 'v_acc', 'v_bar_acc', 'v_score_mean', 'v_bar_score_mean']:
+                new = train_info.get(key, None).cpu().item()
+            else:
+                new = train_info.get(key, None)
+            train_info_history.get(key, []).append(new)
+
+        # print(train_info_history["v_acc"])
+        # print(train_info_history["v_bar_acc"])
+
         # record validation loss
         for key in set(val_info_history):
-            if key != 'ss':
-                new = val_info.get(key, None).cpu().item()
+            if args.disentangle != 0:
+                if key not in ['ss', 'ss-plot']:
+                    new = val_info.get(key, None).cpu().item()
+                else:
+                    new = val_info.get(key, None)
             else:
-                new = val_info.get(key, None)
+                if key not in ['ss', 'ss-plot', 'TC_loss', 'discriminator_loss', 'v_acc', 'v_bar_acc', 'v_score_mean', 'v_bar_score_mean']:
+                    new = val_info.get(key, None).cpu().item()
+                else:
+                    new = val_info.get(key, None)
             val_info_history.get(key, []).append(new)
+
+        # plot training process
+        if epoch % args.plot_loss_interval == 0:
+            plot_loss_path = os.path.join(plot_loss_dir, f"epoch-{epoch}-loss.png")
+            plot_training_process(train_info_history["loss"], val_info_history["loss"],
+                                  val_info_history["ss-plot"], plot_loss_path)
 
         # check whether to use early stop
         early_stop = False
         val_loss = val_info["loss"]
+        logging.info(f"Best Val Loss Before: \t\t\t {best_loss}")
+
+        if val_loss.get_device() != -1:
+            val_loss = val_loss.cpu()
+        if not isinstance(best_loss, float):
+            if best_loss.get_device() != -1:
+                best_loss = best_loss.cpu()
+
         if val_loss < best_loss:
+
+            if best_loss - val_loss < args.min_step: # 0.1 or 0.05
+                bad_epochs += 1
+            else:
+                bad_epochs = 0
+
             best_loss = val_loss
-            bad_epochs = 0
+            if bad_epochs == 0:
+                logging.info(f"Updated Best Val Loss Now: \t\t {best_loss}")
+            else:
+                logging.info(f"Updated Best Val Loss Now: \t\t {best_loss}, bad epochs: {bad_epochs}")
+            #bad_epochs = 0
             # save the best model so far
             save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
                             epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
-                            name="best")
+                            train_info_history=train_info_history, name="best")
         else:
             bad_epochs += 1
+            logging.info(f"No changing in Best Val Loss, still: \t {best_loss}, bad epochs: {bad_epochs}")
         if bad_epochs >= args.patience:
             early_stop = True
 
         # Save checkpoints
-        if epoch % args.save_interval == 0:
+        if (epoch+1) % args.save_interval == 0:
             name = "last"
             if early_stop:
                 name = "final"
             save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
                             epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
-                            name=name)
+                            train_info_history=train_info_history, name=name)
+
+        # for record
+        record_interval = 50
+        if (epoch+1) % record_interval == 0:
+            name1 = f"{epoch}"
+            save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE,
+                            optimizer=optimizer,
+                            epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs,
+                            val_info_history=val_info_history,
+                            train_info_history=train_info_history, name=name1)
 
         # early stop
         if early_stop:
@@ -522,13 +668,14 @@ def train_contrastive_VAE(args):
         if epoch == args.max_epoch - 1:
             save_checkpoint(model_info_dir=model_info_dir, trial_name=args.trial_name, model=cVAE, optimizer=optimizer,
                             epoch=epoch, best_loss=best_loss, bad_epochs=bad_epochs, val_info_history=val_info_history,
-                            name="final")
+                            train_info_history=train_info_history, name="final")
             logging.info("! Reaching the maximum epoch number")
 
     logging.info("Done!")
 
 
 if __name__ == '__main__':
+    torch.autograd.set_detect_anomaly(True)
 
     # get args from bash command
     args = get_args()
